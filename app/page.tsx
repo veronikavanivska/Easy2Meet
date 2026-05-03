@@ -1,65 +1,87 @@
-import Image from "next/image";
+import Link from "next/link";
 
-export default function Home() {
+export default function HomePage() {
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
+      <main className="relative min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_#dbeafe,_#eff6ff_35%,_#e0e7ff_65%,_#f8fafc_100%)]">
+        <div className="absolute inset-0 overflow-hidden">
+          <div className="absolute left-[-80px] top-[-80px] h-72 w-72 rounded-full bg-blue-500/25 blur-3xl" />
+          <div className="absolute right-[-100px] top-[80px] h-80 w-80 rounded-full bg-indigo-500/20 blur-3xl" />
+          <div className="absolute bottom-[-100px] left-[20%] h-96 w-96 rounded-full bg-sky-400/20 blur-3xl" />
+        </div>
+
+        <section className="relative mx-auto flex min-h-screen max-w-6xl flex-col items-center justify-center px-6 py-16 text-center">
+          <div className="rounded-full border border-white/40 bg-white/30 px-4 py-2 text-sm font-medium text-blue-900 backdrop-blur-xl shadow-[0_8px_30px_rgba(0,0,0,0.08)]">
+            Easy2Meet — planowanie spotkań w nowoczesnym stylu
+          </div>
+
+          <h1 className="mt-8 max-w-4xl text-5xl font-bold tracking-tight text-slate-900 md:text-6xl">
+            Ustal termin i miejsce spotkania
+            <span className="block bg-gradient-to-r from-blue-700 via-indigo-700 to-sky-600 bg-clip-text text-transparent">
+            szybko, wspólnie i bez chaosu
+          </span>
           </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+
+          <p className="mt-6 max-w-2xl text-lg leading-8 text-slate-700">
+            Twórz wydarzenia, dodawaj propozycje terminów i miejsc, zapraszaj
+            uczestników do głosowania i zatwierdzaj finalny plan spotkania.
           </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
+
+          <div className="mt-10 flex flex-wrap justify-center gap-4">
+            <Link
+                href="/dashboard"
+                className="rounded-2xl border border-blue-700/30 bg-blue-700 px-6 py-3 font-semibold text-white shadow-[0_10px_30px_rgba(29,78,216,0.35)] transition hover:scale-[1.02] hover:bg-blue-800"
+            >
+              Przejdź do aplikacji
+            </Link>
+
+            <Link
+                href="/sign-in"
+                className="rounded-2xl border border-white/50 bg-white/35 px-6 py-3 font-semibold text-slate-800 backdrop-blur-xl shadow-[0_8px_30px_rgba(0,0,0,0.08)] transition hover:bg-white/50"
+            >
+              Zaloguj się
+            </Link>
+          </div>
+
+          <div className="mt-16 grid w-full gap-5 md:grid-cols-3">
+            <div className="rounded-3xl border border-white/40 bg-white/30 p-6 text-left backdrop-blur-2xl shadow-[0_10px_40px_rgba(30,41,59,0.08)]">
+              <div className="mb-4 inline-flex rounded-2xl bg-blue-700/10 px-3 py-1 text-sm font-medium text-blue-800">
+                Terminy
+              </div>
+              <h2 className="text-lg font-semibold text-slate-900">
+                Dodawaj wiele opcji
+              </h2>
+              <p className="mt-2 text-sm text-slate-700">
+                Dodaj kilka możliwych dat i godzin, aby uczestnicy mogli wybrać
+                najlepszy termin.
+              </p>
+            </div>
+
+            <div className="rounded-3xl border border-white/40 bg-white/30 p-6 text-left backdrop-blur-2xl shadow-[0_10px_40px_rgba(30,41,59,0.08)]">
+              <div className="mb-4 inline-flex rounded-2xl bg-indigo-700/10 px-3 py-1 text-sm font-medium text-indigo-800">
+                Miejsca
+              </div>
+              <h2 className="text-lg font-semibold text-slate-900">
+                Głosowanie na lokalizację
+              </h2>
+              <p className="mt-2 text-sm text-slate-700">
+                Zaproponuj różne miejsca i pozwól uczestnikom wybrać to
+                najwygodniejsze.
+              </p>
+            </div>
+
+            <div className="rounded-3xl border border-white/40 bg-white/30 p-6 text-left backdrop-blur-2xl shadow-[0_10px_40px_rgba(30,41,59,0.08)]">
+              <div className="mb-4 inline-flex rounded-2xl bg-sky-700/10 px-3 py-1 text-sm font-medium text-sky-800">
+                Finalizacja
+              </div>
+              <h2 className="text-lg font-semibold text-slate-900">
+                Finalny plan spotkania
+              </h2>
+              <p className="mt-2 text-sm text-slate-700">
+                Zamknij głosowanie i zatwierdź ostateczny termin oraz miejsce.
+              </p>
+            </div>
+          </div>
+        </section>
       </main>
-    </div>
   );
 }
