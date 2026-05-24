@@ -293,7 +293,7 @@ async function closeEventIfEveryoneVoted(eventId: string) {
 
     const { data: event } = await supabase
         .from("events")
-        .select("id, status")
+        .select("id, status, voting_deadline")
         .eq("id", eventId)
         .single();
 
