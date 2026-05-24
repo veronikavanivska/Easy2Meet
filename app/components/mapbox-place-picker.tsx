@@ -8,25 +8,31 @@ type MapboxPlacePickerProps = {
     disabled?: boolean;
 };
 
+type MapboxContextItem = {
+    id?: string;
+    text?: string;
+    short_code?: string;
+};
+
 type MapboxFeature = {
     id?: string;
     place_name?: string;
     text?: string;
     center?: number[];
     bbox?: number[];
-    relevance?: number;
+    context?: MapboxContextItem[];
 };
 
 type MapboxGeocodingResponse = {
     features?: MapboxFeature[];
 };
 
-type Coordinates = {
-    latitude: string;
-    longitude: string;
+type CityViewport = {
+    center: [number, number];
+    bbox?: [number, number, number, number];
 };
 
-const POLAND_CENTER: [number, number] = [19.1451, 51.9194];
+const DEFAULT_CENTER: [number, number] = [19.1451, 51.9194];
 
 const inputClassName =
     "w-full rounded-2xl border border-white/60 bg-white/70 px-4 py-3 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-600 focus:ring-4 focus:ring-blue-600/10 disabled:opacity-50";
@@ -34,34 +40,46 @@ const inputClassName =
 const suggestionClassName =
     "w-full rounded-xl px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-blue-50 hover:text-blue-800";
 
-function getNumberPair(value: number[] | undefined): [number, number] | null {
-    if (!Array.isArray(value)) return null;
+function getFeatureCoordinates(feature: MapboxFeature): [number, number] | null {
+    const center = feature.center;
 
-    const longitude = value[0];
-    const latitude = value[1];
+    if (!Array.isArray(center)) return null;
 
-    if (typeof longitude !== "number" || typeof latitude !== "number") {
-        return null;
-    }
+    const lng = center[0];
+    const lat = center[1];
 
-    return [longitude, latitude];
+    if (typeof lng !== "number" || typeof lat !== "number") return null;
+
+    return [lng, lat];
 }
 
-function getBbox(value: number[] | undefined): [number, number, number, number] | null {
-    if (!Array.isArray(value) || value.length < 4) return null;
+function getFeatureCountryCode(feature: MapboxFeature) {
+    const country = feature.context?.find((item) => item.id?.startsWith("country."));
 
-    const [minLng, minLat, maxLng, maxLat] = value;
+    return country?.short_code?.toUpperCase() ?? "";
+}
 
-    if (
-        typeof minLng !== "number" ||
-        typeof minLat !== "number" ||
-        typeof maxLng !== "number" ||
-        typeof maxLat !== "number"
-    ) {
-        return null;
+async function reverseGeocode(
+    accessToken: string,
+    longitude: number,
+    latitude: number
+) {
+    const url = new URL(
+        `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json`
+    );
+
+    url.searchParams.set("access_token", accessToken);
+    url.searchParams.set("language", "pl,en");
+    url.searchParams.set("limit", "1");
+
+    const response = await fetch(url.toString());
+
+    if (!response.ok) {
+        throw new Error(`Mapbox reverse geocoding failed: ${response.status}`);
     }
 
-    return [minLng, minLat, maxLng, maxLat];
+    const data = (await response.json()) as MapboxGeocodingResponse;
+    return data.features?.[0] ?? null;
 }
 
 export function MapboxPlacePicker({ disabled = false }: MapboxPlacePickerProps) {
@@ -73,56 +91,119 @@ export function MapboxPlacePicker({ disabled = false }: MapboxPlacePickerProps) 
 
     const [city, setCity] = useState("");
     const [address, setAddress] = useState("");
-    const [coordinates, setCoordinates] = useState<Coordinates>({
-        latitude: "",
-        longitude: "",
-    });
+    const [latitude, setLatitude] = useState("");
+    const [longitude, setLongitude] = useState("");
     const [mapboxId, setMapboxId] = useState("");
     const [suggestions, setSuggestions] = useState<MapboxFeature[]>([]);
-    const [cityCenter, setCityCenter] = useState<[number, number] | null>(null);
-    const [cityBbox, setCityBbox] = useState<[number, number, number, number] | null>(null);
-    const [isCityLoading, setIsCityLoading] = useState(false);
-    const [isAddressLoading, setIsAddressLoading] = useState(false);
+    const [cityViewport, setCityViewport] = useState<CityViewport | null>(null);
+    const [isLoadingCity, setIsLoadingCity] = useState(false);
+    const [isLoadingSuggestions, setIsLoadingSuggestions] = useState(false);
 
-    const selectedLongitude = coordinates.longitude ? Number(coordinates.longitude) : null;
-    const selectedLatitude = coordinates.latitude ? Number(coordinates.latitude) : null;
+    const hasSelectedLocation = latitude !== "" && longitude !== "";
 
-    const hasSelectedCoordinates =
-        typeof selectedLongitude === "number" &&
-        typeof selectedLatitude === "number" &&
-        !Number.isNaN(selectedLongitude) &&
-        !Number.isNaN(selectedLatitude);
+    const selectedCoordinates = useMemo<[number, number] | null>(() => {
+        const lat = Number(latitude);
+        const lng = Number(longitude);
 
-    const mapCenter = useMemo<[number, number]>(() => {
-        if (hasSelectedCoordinates) {
-            return [selectedLongitude, selectedLatitude];
+        if (Number.isNaN(lat) || Number.isNaN(lng)) return null;
+
+        return [lng, lat];
+    }, [latitude, longitude]);
+
+    function clearSelectedLocation() {
+        setLatitude("");
+        setLongitude("");
+        setMapboxId("");
+
+        if (markerRef.current) {
+            markerRef.current.remove();
+            markerRef.current = null;
+        }
+    }
+
+    function setSelectedLocation(params: {
+        address: string;
+        latitude: number;
+        longitude: number;
+        mapboxId?: string;
+        fly?: boolean;
+    }) {
+        setAddress(params.address);
+        setLatitude(String(params.latitude));
+        setLongitude(String(params.longitude));
+        setMapboxId(params.mapboxId ?? "");
+        setSuggestions([]);
+
+        if (!mapRef.current) return;
+
+        const lngLat: [number, number] = [params.longitude, params.latitude];
+
+        if (!markerRef.current) {
+            markerRef.current = new mapboxgl.Marker().setLngLat(lngLat).addTo(mapRef.current);
+        } else {
+            markerRef.current.setLngLat(lngLat);
         }
 
-        return cityCenter ?? POLAND_CENTER;
-    }, [cityCenter, hasSelectedCoordinates, selectedLatitude, selectedLongitude]);
-
-    function clearCoordinates() {
-        setCoordinates({
-            latitude: "",
-            longitude: "",
-        });
-        setMapboxId("");
+        if (params.fly !== false) {
+            mapRef.current.flyTo({
+                center: lngLat,
+                zoom: 14,
+            });
+        }
     }
 
-    function setSelectedPlace(input: {
-        address: string;
-        longitude: number;
-        latitude: number;
-        mapboxId?: string;
-    }) {
-        setAddress(input.address);
-        setCoordinates({
-            latitude: String(input.latitude),
-            longitude: String(input.longitude),
+    useEffect(() => {
+        if (!accessToken || disabled) return;
+        if (!mapContainerRef.current) return;
+        if (mapRef.current) return;
+
+        mapboxgl.accessToken = accessToken;
+
+        const map = new mapboxgl.Map({
+            container: mapContainerRef.current,
+            style: "mapbox://styles/mapbox/streets-v12",
+            center: DEFAULT_CENTER,
+            zoom: 4,
         });
-        setMapboxId(input.mapboxId ?? "");
-        setSuggestions([]);
-    }
+
+        map.addControl(new mapboxgl.NavigationControl(), "top-right");
+
+        map.on("click", async (event) => {
+            if (disabled || !accessToken) return;
+
+            const lng = event.lngLat.lng;
+            const lat = event.lngLat.lat;
+
+            try {
+                const feature = await reverseGeocode(accessToken, lng, lat);
+
+                setSelectedLocation({
+                    address: feature?.place_name ?? `${lat.toFixed(6)}, ${lng.toFixed(6)}`,
+                    latitude: lat,
+                    longitude: lng,
+                    mapboxId: feature?.id,
+                    fly: false,
+                });
+            } catch (error) {
+                console.error(error);
+
+                setSelectedLocation({
+                    address: `${lat.toFixed(6)}, ${lng.toFixed(6)}`,
+                    latitude: lat,
+                    longitude: lng,
+                    fly: false,
+                });
+            }
+        });
+
+        mapRef.current = map;
+
+        return () => {
+            map.remove();
+            mapRef.current = null;
+            markerRef.current = null;
+        };
+    }, [accessToken, disabled]);
 
     useEffect(() => {
         if (!accessToken || disabled) return;
@@ -130,8 +211,7 @@ export function MapboxPlacePicker({ disabled = false }: MapboxPlacePickerProps) 
         const trimmedCity = city.trim();
 
         if (trimmedCity.length < 2) {
-            setCityCenter(null);
-            setCityBbox(null);
+            setCityViewport(null);
             return;
         }
 
@@ -139,48 +219,79 @@ export function MapboxPlacePicker({ disabled = false }: MapboxPlacePickerProps) 
 
         const timeout = window.setTimeout(async () => {
             try {
-                setIsCityLoading(true);
+                setIsLoadingCity(true);
 
                 const url = new URL(
                     `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(
-                        `${trimmedCity}, Polska`
+                        trimmedCity
                     )}.json`
                 );
 
                 url.searchParams.set("access_token", accessToken);
-                url.searchParams.set("country", "pl");
-                url.searchParams.set("language", "pl");
+                url.searchParams.set("language", "pl,en");
+                url.searchParams.set("types", "place,locality,district,region");
                 url.searchParams.set("limit", "1");
-                url.searchParams.set("types", "place,locality,district,region,postcode");
 
                 const response = await fetch(url.toString(), {
                     signal: controller.signal,
                 });
 
                 if (!response.ok) {
-                    setCityCenter(null);
-                    setCityBbox(null);
+                    setCityViewport(null);
                     return;
                 }
 
                 const data = (await response.json()) as MapboxGeocodingResponse;
                 const feature = data.features?.[0];
 
-                const center = getNumberPair(feature?.center);
-                const bbox = getBbox(feature?.bbox);
+                const coordinates = feature ? getFeatureCoordinates(feature) : null;
 
-                setCityCenter(center);
-                setCityBbox(bbox);
-            } catch (error) {
-                if (error instanceof DOMException && error.name === "AbortError") {
+                if (!coordinates) {
+                    setCityViewport(null);
                     return;
                 }
 
-                console.error("Mapbox city lookup error:", error);
-                setCityCenter(null);
-                setCityBbox(null);
+                const bbox =
+                    Array.isArray(feature?.bbox) && feature.bbox.length >= 4
+                        ? ([
+                            feature.bbox[0],
+                            feature.bbox[1],
+                            feature.bbox[2],
+                            feature.bbox[3],
+                        ] as [number, number, number, number])
+                        : undefined;
+
+                setCityViewport({
+                    center: coordinates,
+                    bbox,
+                });
+
+                if (mapRef.current) {
+                    if (bbox) {
+                        mapRef.current.fitBounds(
+                            [
+                                [bbox[0], bbox[1]],
+                                [bbox[2], bbox[3]],
+                            ],
+                            {
+                                padding: 70,
+                                maxZoom: 12,
+                            }
+                        );
+                    } else {
+                        mapRef.current.flyTo({
+                            center: coordinates,
+                            zoom: 11,
+                        });
+                    }
+                }
+            } catch (error) {
+                if (error instanceof DOMException && error.name === "AbortError") return;
+
+                console.error(error);
+                setCityViewport(null);
             } finally {
-                setIsCityLoading(false);
+                setIsLoadingCity(false);
             }
         }, 350);
 
@@ -194,19 +305,23 @@ export function MapboxPlacePicker({ disabled = false }: MapboxPlacePickerProps) 
         if (!accessToken || disabled) return;
 
         const trimmedAddress = address.trim();
-        const trimmedCity = city.trim();
 
-        if (trimmedAddress.length < 3) return;
+        if (trimmedAddress.length < 3) {
+            setSuggestions([]);
+            return;
+        }
+
+        if (hasSelectedLocation) return;
 
         const controller = new AbortController();
 
         const timeout = window.setTimeout(async () => {
             try {
-                setIsAddressLoading(true);
+                setIsLoadingSuggestions(true);
 
-                const query = trimmedCity
-                    ? `${trimmedAddress}, ${trimmedCity}, Polska`
-                    : `${trimmedAddress}, Polska`;
+                const query = city.trim()
+                    ? `${trimmedAddress}, ${city.trim()}`
+                    : trimmedAddress;
 
                 const url = new URL(
                     `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(
@@ -215,17 +330,19 @@ export function MapboxPlacePicker({ disabled = false }: MapboxPlacePickerProps) 
                 );
 
                 url.searchParams.set("access_token", accessToken);
-                url.searchParams.set("country", "pl");
-                url.searchParams.set("language", "pl");
+                url.searchParams.set("language", "pl,en");
                 url.searchParams.set("limit", "8");
-                url.searchParams.set("types", "address,poi");
+                url.searchParams.set("types", "address,poi,place,locality");
 
-                if (cityBbox) {
-                    url.searchParams.set("bbox", cityBbox.join(","));
+                if (cityViewport?.center) {
+                    url.searchParams.set(
+                        "proximity",
+                        `${cityViewport.center[0]},${cityViewport.center[1]}`
+                    );
                 }
 
-                if (cityCenter) {
-                    url.searchParams.set("proximity", `${cityCenter[0]},${cityCenter[1]}`);
+                if (cityViewport?.bbox) {
+                    url.searchParams.set("bbox", cityViewport.bbox.join(","));
                 }
 
                 const response = await fetch(url.toString(), {
@@ -240,31 +357,22 @@ export function MapboxPlacePicker({ disabled = false }: MapboxPlacePickerProps) 
                 const data = (await response.json()) as MapboxGeocodingResponse;
                 const features = data.features ?? [];
 
-                const sortedFeatures = [...features].sort((a, b) => {
-                    const cityLower = trimmedCity.toLowerCase();
-                    const aName = (a.place_name ?? "").toLowerCase();
-                    const bName = (b.place_name ?? "").toLowerCase();
+                const filteredFeatures = features.filter((feature) => {
+                    const coordinates = getFeatureCoordinates(feature);
 
-                    const aHasCity = cityLower ? aName.includes(cityLower) : false;
-                    const bHasCity = cityLower ? bName.includes(cityLower) : false;
+                    if (!coordinates) return false;
 
-                    if (aHasCity !== bHasCity) {
-                        return aHasCity ? -1 : 1;
-                    }
-
-                    return (b.relevance ?? 0) - (a.relevance ?? 0);
+                    return Boolean(feature.place_name || feature.text);
                 });
 
-                setSuggestions(sortedFeatures);
+                setSuggestions(filteredFeatures);
             } catch (error) {
-                if (error instanceof DOMException && error.name === "AbortError") {
-                    return;
-                }
+                if (error instanceof DOMException && error.name === "AbortError") return;
 
-                console.error("Mapbox address lookup error:", error);
+                console.error(error);
                 setSuggestions([]);
             } finally {
-                setIsAddressLoading(false);
+                setIsLoadingSuggestions(false);
             }
         }, 350);
 
@@ -272,141 +380,27 @@ export function MapboxPlacePicker({ disabled = false }: MapboxPlacePickerProps) 
             window.clearTimeout(timeout);
             controller.abort();
         };
-    }, [accessToken, address, city, cityBbox, cityCenter, disabled]);
-
-    useEffect(() => {
-        if (!accessToken || !mapContainerRef.current || mapRef.current) return;
-
-        mapboxgl.accessToken = accessToken;
-
-        const map = new mapboxgl.Map({
-            container: mapContainerRef.current,
-            style: "mapbox://styles/mapbox/streets-v12",
-            center: mapCenter,
-            zoom: cityCenter ? 11 : 5,
-        });
-
-        map.addControl(new mapboxgl.NavigationControl(), "top-right");
-
-        map.on("click", async (event) => {
-            if (disabled) return;
-
-            const longitude = event.lngLat.lng;
-            const latitude = event.lngLat.lat;
-
-            setCoordinates({
-                latitude: String(latitude),
-                longitude: String(longitude),
-            });
-            setMapboxId("");
-
-            try {
-                const url = new URL(
-                    `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json`
-                );
-
-                url.searchParams.set("access_token", accessToken);
-                url.searchParams.set("country", "pl");
-                url.searchParams.set("language", "pl");
-                url.searchParams.set("limit", "1");
-
-                const response = await fetch(url.toString());
-
-                if (!response.ok) return;
-
-                const data = (await response.json()) as MapboxGeocodingResponse;
-                const feature = data.features?.[0];
-
-                if (feature?.place_name) {
-                    setAddress(feature.place_name);
-                }
-
-                if (feature?.id) {
-                    setMapboxId(feature.id);
-                }
-            } catch (error) {
-                console.error("Mapbox reverse geocoding error:", error);
-            }
-        });
-
-        mapRef.current = map;
-
-        return () => {
-            markerRef.current?.remove();
-            markerRef.current = null;
-            map.remove();
-            mapRef.current = null;
-        };
-        // map must be initialized once
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [accessToken, disabled]);
-
-    useEffect(() => {
-        const map = mapRef.current;
-
-        if (!map) return;
-
-        map.easeTo({
-            center: mapCenter,
-            zoom: hasSelectedCoordinates ? 15 : cityCenter ? 11 : 5,
-            duration: 600,
-        });
-    }, [cityCenter, hasSelectedCoordinates, mapCenter]);
-
-    useEffect(() => {
-        const map = mapRef.current;
-
-        if (!map || !hasSelectedCoordinates) return;
-
-        const lngLat: [number, number] = [selectedLongitude, selectedLatitude];
-
-        if (!markerRef.current) {
-            markerRef.current = new mapboxgl.Marker({
-                draggable: !disabled,
-            })
-                .setLngLat(lngLat)
-                .addTo(map);
-
-            markerRef.current.on("dragend", () => {
-                const markerLngLat = markerRef.current?.getLngLat();
-
-                if (!markerLngLat) return;
-
-                setCoordinates({
-                    latitude: String(markerLngLat.lat),
-                    longitude: String(markerLngLat.lng),
-                });
-            });
-
-            return;
-        }
-
-        markerRef.current.setLngLat(lngLat);
-    }, [disabled, hasSelectedCoordinates, selectedLatitude, selectedLongitude]);
+    }, [accessToken, address, city, cityViewport, disabled, hasSelectedLocation]);
 
     function selectSuggestion(feature: MapboxFeature) {
-        const center = getNumberPair(feature.center);
+        const coordinates = getFeatureCoordinates(feature);
 
-        if (!center) return;
+        if (!coordinates) return;
 
-        setSelectedPlace({
+        const [lng, lat] = coordinates;
+        const countryCode = getFeatureCountryCode(feature);
+        const suffix = countryCode ? ` (${countryCode})` : "";
+
+        setSelectedLocation({
             address: feature.place_name ?? feature.text ?? address,
-            longitude: center[0],
-            latitude: center[1],
+            latitude: lat,
+            longitude: lng,
             mapboxId: feature.id,
         });
-    }
 
-    if (!accessToken) {
-        return (
-            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
-                Brakuje NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN.
-                <input type="hidden" name="address" value={address} />
-                <input type="hidden" name="latitude" value="" />
-                <input type="hidden" name="longitude" value="" />
-                <input type="hidden" name="mapboxId" value="" />
-            </div>
-        );
+        if (feature.place_name && countryCode && !feature.place_name.includes(countryCode)) {
+            console.info(`Selected Mapbox place${suffix}`);
+        }
     }
 
     return (
@@ -416,11 +410,11 @@ export function MapboxPlacePicker({ disabled = false }: MapboxPlacePickerProps) 
                 value={city}
                 onChange={(event) => {
                     setCity(event.target.value);
-                    setSuggestions([]);
-                    clearCoordinates();
+                    clearSelectedLocation();
                 }}
                 disabled={disabled}
-                placeholder="Miasto opcjonalnie, np. Kraków"
+                placeholder="Miasto opcjonalnie, np. Rzeszów, Berlin, London"
+                autoComplete="off"
                 className={inputClassName}
             />
 
@@ -430,11 +424,10 @@ export function MapboxPlacePicker({ disabled = false }: MapboxPlacePickerProps) 
                     value={address}
                     onChange={(event) => {
                         setAddress(event.target.value);
-                        setSuggestions([]);
-                        clearCoordinates();
+                        clearSelectedLocation();
                     }}
                     disabled={disabled}
-                    placeholder="Adres lub miejsce, np. Rynek 1"
+                    placeholder="Adres lub miejsce, np. Akademicka 3, Alexanderplatz"
                     autoComplete="off"
                     className={inputClassName}
                 />
@@ -456,34 +449,39 @@ export function MapboxPlacePicker({ disabled = false }: MapboxPlacePickerProps) 
                         ))}
                     </div>
                 )}
+            </div>
 
-                {!disabled && (isAddressLoading || isCityLoading) && (
-                    <p className="mt-2 text-xs text-slate-500">
-                        Szukanie lokalizacji...
+            <div className="overflow-hidden rounded-2xl border border-white/60 bg-white/40">
+                <div ref={mapContainerRef} className="h-72 w-full" />
+            </div>
+
+            <input type="hidden" name="address" value={address} />
+            <input type="hidden" name="latitude" value={latitude} />
+            <input type="hidden" name="longitude" value={longitude} />
+            <input type="hidden" name="mapboxId" value={mapboxId} />
+
+            <div className="space-y-1 text-xs">
+                {isLoadingCity && (
+                    <p className="text-slate-500">Szukam miasta...</p>
+                )}
+
+                {isLoadingSuggestions && (
+                    <p className="text-slate-500">Szukam adresów...</p>
+                )}
+
+                {address && !hasSelectedLocation && (
+                    <p className="text-amber-700">
+                        Wybierz adres z listy albo kliknij punkt na mapie.
+                    </p>
+                )}
+
+                {hasSelectedLocation && selectedCoordinates && (
+                    <p className="text-emerald-700">
+                        Lokalizacja wybrana: {Number(latitude).toFixed(5)},{" "}
+                        {Number(longitude).toFixed(5)}
                     </p>
                 )}
             </div>
-
-            <div className="overflow-hidden rounded-2xl border border-white/60 bg-white/50">
-                <div ref={mapContainerRef} className="h-[280px] w-full" />
-            </div>
-
-            <input type="hidden" name="latitude" value={coordinates.latitude} />
-            <input type="hidden" name="longitude" value={coordinates.longitude} />
-            <input type="hidden" name="mapboxId" value={mapboxId} />
-
-            {address && (!coordinates.latitude || !coordinates.longitude) && (
-                <p className="text-xs text-amber-700">
-                    Wybierz sugestię z listy albo kliknij punkt na mapie, aby zapisać współrzędne.
-                </p>
-            )}
-
-            {coordinates.latitude && coordinates.longitude && (
-                <p className="text-xs text-emerald-700">
-                    Lokalizacja wybrana: {Number(coordinates.latitude).toFixed(5)},{" "}
-                    {Number(coordinates.longitude).toFixed(5)}
-                </p>
-            )}
         </div>
     );
 }
