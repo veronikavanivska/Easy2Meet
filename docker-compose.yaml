@@ -9,7 +9,11 @@ services:
     env_file:
       - .env.local
     environment:
-        - TZ=Europe/Warsaw
+      - TZ=Europe/Warsaw
+      - NODE_OPTIONS=--dns-result-order=ipv4first
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     volumes:
       - .:/app
       - /app/node_modules

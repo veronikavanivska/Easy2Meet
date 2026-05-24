@@ -15,10 +15,9 @@ export default async function DashboardPage() {
 
     const { data: events, error } = await supabase
         .from("events")
-        .select("*")
+        .select("id, title, description, status, created_at")
         .eq("organizer_id", userId)
         .order("created_at", { ascending: false });
-
     if (error) {
         throw new Error(error.message);
     }

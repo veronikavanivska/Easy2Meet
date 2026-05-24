@@ -4,7 +4,7 @@ import { auth } from "@clerk/nextjs/server";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
-import { getAppUrl, getFromEmail, resend } from "@/lib/resend";
+import { getAppUrl, sendEmail } from "@/lib/email";
 
 function redirectWithError(eventId: string, message: string): never {
     redirect(`/events/${eventId}?error=${encodeURIComponent(message)}`);
@@ -29,6 +29,32 @@ async function assertEventOwner(eventId: string, userId: string) {
     }
 
     return event;
+}
+
+function sendEmailsInBackground(
+    emails: Array<{
+        to: string;
+        subject: string;
+        html: string;
+    }>
+) {
+    if (emails.length === 0) return;
+
+    void Promise.allSettled(
+        emails.map((email) =>
+            sendEmail({
+                to: email.to,
+                subject: email.subject,
+                html: email.html,
+            })
+        )
+    ).then((results) => {
+        const failed = results.filter((result) => result.status === "rejected");
+
+        if (failed.length > 0) {
+            console.error("Failed to send some emails:", failed);
+        }
+    });
 }
 
 export async function addTimeOptionAction(formData: FormData) {
@@ -75,17 +101,6 @@ export async function addTimeOptionAction(formData: FormData) {
 
     const supabase = createSupabaseAdminClient();
 
-    const { data: existingTimeOption } = await supabase
-        .from("time_options")
-        .select("id")
-        .eq("event_id", eventId)
-        .eq("starts_at", startsAt.toISOString())
-        .maybeSingle();
-
-    if (existingTimeOption) {
-        redirectWithError(eventId, "Taki termin został już dodany.");
-    }
-
     const { error } = await supabase.from("time_options").insert({
         event_id: eventId,
         starts_at: startsAt.toISOString(),
@@ -106,11 +121,37 @@ export async function addPlaceOptionAction(formData: FormData) {
     const eventId = String(formData.get("eventId") || "");
     const name = String(formData.get("name") || "").trim();
     const address = String(formData.get("address") || "").trim();
+    const latitudeRaw = String(formData.get("latitude") || "").trim();
+    const longitudeRaw = String(formData.get("longitude") || "").trim();
+    const mapboxId = String(formData.get("mapboxId") || "").trim();
+
+    const latitude = latitudeRaw ? Number(latitudeRaw) : null;
+    const longitude = longitudeRaw ? Number(longitudeRaw) : null;
 
     if (!eventId) redirect("/dashboard");
 
     if (!name) {
         redirectWithError(eventId, "Nazwa miejsca jest wymagana.");
+    }
+
+    if (
+        latitudeRaw &&
+        (latitude === null ||
+            Number.isNaN(latitude) ||
+            latitude < -90 ||
+            latitude > 90)
+    ) {
+        redirectWithError(eventId, "Nieprawidłowa szerokość geograficzna.");
+    }
+
+    if (
+        longitudeRaw &&
+        (longitude === null ||
+            Number.isNaN(longitude) ||
+            longitude < -180 ||
+            longitude > 180)
+    ) {
+        redirectWithError(eventId, "Nieprawidłowa długość geograficzna.");
     }
 
     const event = await assertEventOwner(eventId, userId);
@@ -127,7 +168,10 @@ export async function addPlaceOptionAction(formData: FormData) {
     const { error } = await supabase.from("place_options").insert({
         event_id: eventId,
         name,
-        address,
+        address: address || null,
+        latitude,
+        longitude,
+        mapbox_id: mapboxId || null,
     });
 
     if (error) redirectWithError(eventId, error.message);
@@ -172,24 +216,22 @@ export async function addParticipantAction(formData: FormData) {
 
     const supabase = createSupabaseAdminClient();
 
-    const { data: existingParticipant } = await supabase
-        .from("participants")
-        .select("id")
-        .eq("event_id", eventId)
-        .eq("email", email)
-        .maybeSingle();
-
-    if (existingParticipant) {
-        redirectWithError(eventId, "Uczestnik z tym adresem e-mail już istnieje.");
-    }
-
     const { error } = await supabase.from("participants").insert({
         event_id: eventId,
         display_name: displayName,
         email,
     });
 
-    if (error) redirectWithError(eventId, error.message);
+    if (error) {
+        if (error.code === "23505") {
+            redirectWithError(
+                eventId,
+                "Uczestnik z tym adresem e-mail już istnieje."
+            );
+        }
+
+        redirectWithError(eventId, error.message);
+    }
 
     revalidatePath(`/events/${eventId}`);
     redirectWithSuccess(
@@ -236,42 +278,47 @@ export async function startVotingAction(formData: FormData) {
 
     const supabase = createSupabaseAdminClient();
 
-    const { data: timeOptions, error: timeError } = await supabase
-        .from("time_options")
-        .select("id")
-        .eq("event_id", eventId);
+    const [timeOptionsResult, placeOptionsResult, participantsResult] =
+        await Promise.all([
+            supabase.from("time_options").select("id").eq("event_id", eventId),
+            supabase.from("place_options").select("id").eq("event_id", eventId),
+            supabase
+                .from("participants")
+                .select("id, display_name, email")
+                .eq("event_id", eventId),
+        ]);
 
-    if (timeError) redirectWithError(eventId, timeError.message);
+    if (timeOptionsResult.error) {
+        redirectWithError(eventId, timeOptionsResult.error.message);
+    }
 
-    const { data: placeOptions, error: placeError } = await supabase
-        .from("place_options")
-        .select("id")
-        .eq("event_id", eventId);
+    if (placeOptionsResult.error) {
+        redirectWithError(eventId, placeOptionsResult.error.message);
+    }
 
-    if (placeError) redirectWithError(eventId, placeError.message);
+    if (participantsResult.error) {
+        redirectWithError(eventId, participantsResult.error.message);
+    }
 
-    const { data: participants, error: participantsError } = await supabase
-        .from("participants")
-        .select("id, display_name, email")
-        .eq("event_id", eventId);
+    const timeOptions = timeOptionsResult.data ?? [];
+    const placeOptions = placeOptionsResult.data ?? [];
+    const participants = participantsResult.data ?? [];
 
-    if (participantsError) redirectWithError(eventId, participantsError.message);
-
-    if (!timeOptions || timeOptions.length === 0) {
+    if (timeOptions.length === 0) {
         redirectWithError(
             eventId,
             "Dodaj przynajmniej jeden termin przed rozpoczęciem głosowania."
         );
     }
 
-    if (!placeOptions || placeOptions.length === 0) {
+    if (placeOptions.length === 0) {
         redirectWithError(
             eventId,
             "Dodaj przynajmniej jedno miejsce przed rozpoczęciem głosowania."
         );
     }
 
-    if (!participants || participants.length === 0) {
+    if (participants.length === 0) {
         redirectWithError(
             eventId,
             "Dodaj przynajmniej jednego uczestnika przed rozpoczęciem głosowania."
@@ -291,49 +338,61 @@ export async function startVotingAction(formData: FormData) {
 
     const voteUrl = `${getAppUrl()}/vote/${event.public_token}`;
 
-    const emailResults = await Promise.allSettled(
-        participants.map((participant) =>
-            resend.emails.send({
-                from: getFromEmail(),
-                to: participant.email,
-                subject: `Głosowanie rozpoczęte: ${event.title}`,
-                html: `
-          <div style="font-family: Arial, sans-serif; line-height: 1.6;">
-            <h2>Easy2Meet</h2>
-            <p>Cześć ${participant.display_name || ""},</p>
-            <p>Głosowanie nad wydarzeniem zostało rozpoczęte:</p>
-            <p><strong>${event.title}</strong></p>
-            <p>Termin zakończenia głosowania: <strong>${votingDeadline.toLocaleString("pl-PL")}</strong></p>
-            <p>Kliknij poniższy link, aby zagłosować:</p>
-            <p>
-              <a href="${voteUrl}" style="display:inline-block;background:#1d4ed8;color:white;padding:12px 18px;border-radius:10px;text-decoration:none;font-weight:bold;">
-                Przejdź do głosowania
-              </a>
-            </p>
-            <p>Jeśli przycisk nie działa, skopiuj ten link:</p>
-            <p>${voteUrl}</p>
-          </div>
-        `,
-            })
-        )
-    );
+    const emails = participants
+        .filter((participant) => participant.email)
+        .map((participant) => ({
+            to: participant.email as string,
+            subject: `Easy2Meet: głosowanie rozpoczęte — ${event.title}`,
+            html: `
+                <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #0f172a;">
+                    <div style="max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 16px; background: #ffffff;">
+                        <h1 style="margin: 0 0 16px; color: #1d4ed8;">Easy2Meet</h1>
 
-    const failedEmails = emailResults.filter(
-        (result) => result.status === "rejected"
-    ).length;
+                        <p>Cześć ${participant.display_name || ""},</p>
+
+                        <p>Głosowanie nad wydarzeniem zostało rozpoczęte:</p>
+
+                        <h2 style="margin: 16px 0; color: #0f172a;">${event.title}</h2>
+
+                        <p>
+                            Termin zakończenia głosowania:
+                            <strong>${votingDeadline.toLocaleString("pl-PL")}</strong>
+                        </p>
+
+                        <p>Kliknij poniższy przycisk, aby wybrać pasujący termin i miejsce:</p>
+
+                        <p style="margin: 24px 0;">
+                            <a href="${voteUrl}"
+                               style="display: inline-block; background: #1d4ed8; color: #ffffff; padding: 12px 20px; border-radius: 10px; text-decoration: none; font-weight: bold;">
+                                Przejdź do głosowania
+                            </a>
+                        </p>
+
+                        <p style="font-size: 14px; color: #64748b;">
+                            Jeśli przycisk nie działa, skopiuj ten link:
+                        </p>
+
+                        <p style="font-size: 14px; word-break: break-all;">
+                            ${voteUrl}
+                        </p>
+
+                        <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;" />
+
+                        <p style="font-size: 12px; color: #64748b;">
+                            Ta wiadomość została wysłana automatycznie przez Easy2Meet.
+                        </p>
+                    </div>
+                </div>
+            `,
+        }));
+
+    sendEmailsInBackground(emails);
 
     revalidatePath(`/events/${eventId}`);
 
-    if (failedEmails > 0) {
-        redirectWithError(
-            eventId,
-            `Głosowanie zostało rozpoczęte, ale nie udało się wysłać ${failedEmails} wiadomości e-mail.`
-        );
-    }
-
     redirectWithSuccess(
         eventId,
-        "Głosowanie zostało rozpoczęte, a zaproszenia wysłane e-mailem."
+        "Głosowanie zostało rozpoczęte. Zaproszenia są wysyłane e-mailem."
     );
 }
 
@@ -521,7 +580,11 @@ type VoteRow = {
     place_option_id?: string;
 };
 
-function countVotesForOption(optionId: string, votes: VoteRow[], key: "time_option_id" | "place_option_id") {
+function countVotesForOption(
+    optionId: string,
+    votes: VoteRow[],
+    key: "time_option_id" | "place_option_id"
+) {
     const relatedVotes = votes.filter((vote) => vote[key] === optionId);
 
     const yes = relatedVotes.filter((vote) => vote.vote === "yes").length;
@@ -575,60 +638,64 @@ export async function finalizeAndSendResultsAction(formData: FormData) {
 
     const supabase = createSupabaseAdminClient();
 
-    const { data: timeOptions, error: timeOptionsError } = await supabase
-        .from("time_options")
-        .select("*")
-        .eq("event_id", eventId);
+    const [
+        timeOptionsResult,
+        placeOptionsResult,
+        timeVotesResult,
+        placeVotesResult,
+        participantsResult,
+    ] = await Promise.all([
+        supabase.from("time_options").select("*").eq("event_id", eventId),
+        supabase.from("place_options").select("*").eq("event_id", eventId),
+        supabase
+            .from("time_votes")
+            .select("time_option_id, vote")
+            .eq("event_id", eventId),
+        supabase
+            .from("place_votes")
+            .select("place_option_id, vote")
+            .eq("event_id", eventId),
+        supabase
+            .from("participants")
+            .select("display_name, email")
+            .eq("event_id", eventId),
+    ]);
 
-    if (timeOptionsError) {
-        redirectWithError(eventId, timeOptionsError.message);
+    if (timeOptionsResult.error) {
+        redirectWithError(eventId, timeOptionsResult.error.message);
     }
 
-    const { data: placeOptions, error: placeOptionsError } = await supabase
-        .from("place_options")
-        .select("*")
-        .eq("event_id", eventId);
-
-    if (placeOptionsError) {
-        redirectWithError(eventId, placeOptionsError.message);
+    if (placeOptionsResult.error) {
+        redirectWithError(eventId, placeOptionsResult.error.message);
     }
 
-    const { data: timeVotes, error: timeVotesError } = await supabase
-        .from("time_votes")
-        .select("time_option_id, vote")
-        .eq("event_id", eventId);
-
-    if (timeVotesError) {
-        redirectWithError(eventId, timeVotesError.message);
+    if (timeVotesResult.error) {
+        redirectWithError(eventId, timeVotesResult.error.message);
     }
 
-    const { data: placeVotes, error: placeVotesError } = await supabase
-        .from("place_votes")
-        .select("place_option_id, vote")
-        .eq("event_id", eventId);
-
-    if (placeVotesError) {
-        redirectWithError(eventId, placeVotesError.message);
+    if (placeVotesResult.error) {
+        redirectWithError(eventId, placeVotesResult.error.message);
     }
 
-    const { data: participants, error: participantsError } = await supabase
-        .from("participants")
-        .select("display_name, email")
-        .eq("event_id", eventId);
-
-    if (participantsError) {
-        redirectWithError(eventId, participantsError.message);
+    if (participantsResult.error) {
+        redirectWithError(eventId, participantsResult.error.message);
     }
 
-    if (!timeOptions || timeOptions.length === 0) {
+    const timeOptions = timeOptionsResult.data ?? [];
+    const placeOptions = placeOptionsResult.data ?? [];
+    const timeVotes = timeVotesResult.data ?? [];
+    const placeVotes = placeVotesResult.data ?? [];
+    const participants = participantsResult.data ?? [];
+
+    if (timeOptions.length === 0) {
         redirectWithError(eventId, "Brak terminów do wybrania.");
     }
 
-    if (!placeOptions || placeOptions.length === 0) {
+    if (placeOptions.length === 0) {
         redirectWithError(eventId, "Brak miejsc do wybrania.");
     }
 
-    if (!participants || participants.length === 0) {
+    if (participants.length === 0) {
         redirectWithError(eventId, "Brak uczestników do wysłania wyników.");
     }
 
@@ -680,51 +747,60 @@ export async function finalizeAndSendResultsAction(formData: FormData) {
         ? `${bestPlace.option.name}, ${bestPlace.option.address}`
         : bestPlace.option.name;
 
-    const emailResults = await Promise.allSettled(
-        participants.map((participant) =>
-            resend.emails.send({
-                from: getFromEmail(),
-                to: participant.email,
-                subject: `Wyniki głosowania: ${event.title}`,
-                html: `
-          <div style="font-family: Arial, sans-serif; line-height: 1.6;">
-            <h2>Easy2Meet</h2>
+    const emails = participants
+        .filter((participant) => participant.email)
+        .map((participant) => ({
+            to: participant.email as string,
+            subject: `Easy2Meet: wyniki głosowania — ${event.title}`,
+            html: `
+                <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #0f172a;">
+                    <div style="max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 16px; background: #ffffff;">
+                        <h1 style="margin: 0 0 16px; color: #1d4ed8;">Easy2Meet</h1>
 
-            <p>Cześć ${participant.display_name || ""},</p>
+                        <p>Cześć ${participant.display_name || ""},</p>
 
-            <p>Głosowanie dla wydarzenia zostało zakończone:</p>
-            <p><strong>${event.title}</strong></p>
+                        <p>Głosowanie dla wydarzenia zostało zakończone:</p>
 
-            <h3>Finalny termin</h3>
-            <p>${finalTimeText}</p>
-            <p>Głosy: Tak ${bestTime.score.yes}, Może ${bestTime.score.maybe}, Nie ${bestTime.score.no}</p>
+                        <h2 style="margin: 16px 0; color: #0f172a;">${event.title}</h2>
 
-            <h3>Finalne miejsce</h3>
-            <p>${finalPlaceText}</p>
-            <p>Głosy: Tak ${bestPlace.score.yes}, Może ${bestPlace.score.maybe}, Nie ${bestPlace.score.no}</p>
+                        <div style="margin: 24px 0; padding: 16px; border-radius: 12px; background: #eff6ff;">
+                            <h3 style="margin: 0 0 8px; color: #1d4ed8;">Najlepszy termin</h3>
+                            <p style="margin: 0; font-size: 16px;">
+                                <strong>${finalTimeText}</strong>
+                            </p>
+                            <p style="margin: 8px 0 0; font-size: 14px; color: #475569;">
+                                Głosy: Tak ${bestTime.score.yes}, Może ${bestTime.score.maybe}, Nie ${bestTime.score.no}
+                            </p>
+                        </div>
 
-            <p>Dziękujemy za udział w głosowaniu.</p>
-          </div>
-        `,
-            })
-        )
-    );
+                        <div style="margin: 24px 0; padding: 16px; border-radius: 12px; background: #f8fafc;">
+                            <h3 style="margin: 0 0 8px; color: #1d4ed8;">Najlepsze miejsce</h3>
+                            <p style="margin: 0; font-size: 16px;">
+                                <strong>${finalPlaceText}</strong>
+                            </p>
+                            <p style="margin: 8px 0 0; font-size: 14px; color: #475569;">
+                                Głosy: Tak ${bestPlace.score.yes}, Może ${bestPlace.score.maybe}, Nie ${bestPlace.score.no}
+                            </p>
+                        </div>
 
-    const failedEmails = emailResults.filter(
-        (result) => result.status === "rejected"
-    ).length;
+                        <p>Dziękujemy za udział w głosowaniu.</p>
+
+                        <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;" />
+
+                        <p style="font-size: 12px; color: #64748b;">
+                            Ta wiadomość została wysłana automatycznie przez Easy2Meet.
+                        </p>
+                    </div>
+                </div>
+            `,
+        }));
+
+    sendEmailsInBackground(emails);
 
     revalidatePath(`/events/${eventId}`);
 
-    if (failedEmails > 0) {
-        redirectWithError(
-            eventId,
-            `Wyniki zostały zatwierdzone, ale nie udało się wysłać ${failedEmails} wiadomości e-mail.`
-        );
-    }
-
     redirectWithSuccess(
         eventId,
-        "Wyniki zostały zatwierdzone i wysłane uczestnikom e-mailem."
+        "Wyniki zostały zatwierdzone. Wiadomości e-mail są wysyłane uczestnikom."
     );
 }

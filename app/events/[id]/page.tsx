@@ -15,6 +15,8 @@ import {
     finalizeAndSendResultsAction,
     startVotingAction,
 } from "./actions";
+import { EventPlacesMap } from "../../components/event-places-map";
+import { MapboxAddressInput } from "../../components/mapbox-address-input";
 
 type PageProps = {
     params: Promise<{
@@ -50,6 +52,9 @@ type PlaceOption = {
     event_id: string;
     name: string;
     address: string | null;
+    latitude: number | null;
+    longitude: number | null;
+    mapbox_id?: string | null;
 };
 
 type Participant = {
@@ -152,30 +157,6 @@ function formatTimeOption(option: TimeOption) {
     return `${start} — ${end}`;
 }
 
-async function closeEventIfDeadlinePassed<T extends EventRecord>(
-    event: T
-): Promise<T> {
-    if (event.status !== "voting") return event;
-    if (!event.voting_deadline) return event;
-
-    const deadline = new Date(event.voting_deadline);
-
-    if (deadline > new Date()) return event;
-
-    const supabase = createSupabaseAdminClient();
-
-    const { data: updatedEvent } = await supabase
-        .from("events")
-        .update({
-            status: "closed",
-        })
-        .eq("id", event.id)
-        .select("*")
-        .single();
-
-    return (updatedEvent as T | null) ?? event;
-}
-
 export default async function EventDetailsPage({
                                                    params,
                                                    searchParams,
@@ -189,12 +170,52 @@ export default async function EventDetailsPage({
 
     const supabase = createSupabaseAdminClient();
 
-    const { data: eventData, error } = await supabase
-        .from("events")
-        .select("*")
-        .eq("id", id)
-        .eq("organizer_id", userId)
-        .single();
+    const [
+        eventResult,
+        timeOptionsResult,
+        placeOptionsResult,
+        participantsResult,
+        timeVotesResult,
+        placeVotesResult,
+    ] = await Promise.all([
+        supabase
+            .from("events")
+            .select("*")
+            .eq("id", id)
+            .eq("organizer_id", userId)
+            .single(),
+
+        supabase
+            .from("time_options")
+            .select("*")
+            .eq("event_id", id)
+            .order("starts_at", { ascending: true }),
+
+        supabase
+            .from("place_options")
+            .select("*")
+            .eq("event_id", id)
+            .order("created_at", { ascending: true }),
+
+        supabase
+            .from("participants")
+            .select("*")
+            .eq("event_id", id)
+            .order("created_at", { ascending: true }),
+
+        supabase
+            .from("time_votes")
+            .select("*")
+            .eq("event_id", id),
+
+        supabase
+            .from("place_votes")
+            .select("*")
+            .eq("event_id", id),
+    ]);
+
+    const eventData = eventResult.data;
+    const error = eventResult.error;
 
     if (error || !eventData) {
         return (
@@ -219,47 +240,32 @@ export default async function EventDetailsPage({
         );
     }
 
-    const event = await closeEventIfDeadlinePassed(eventData as EventRecord);
+    if (timeOptionsResult.error) {
+        throw new Error(timeOptionsResult.error.message);
+    }
 
-    const { data: timeOptionsData, error: timeOptionsError } = await supabase
-        .from("time_options")
-        .select("*")
-        .eq("event_id", id)
-        .order("starts_at", { ascending: true });
+    if (placeOptionsResult.error) {
+        throw new Error(placeOptionsResult.error.message);
+    }
 
-    if (timeOptionsError) throw new Error(timeOptionsError.message);
+    if (participantsResult.error) {
+        throw new Error(participantsResult.error.message);
+    }
 
-    const { data: placeOptionsData, error: placeOptionsError } = await supabase
-        .from("place_options")
-        .select("*")
-        .eq("event_id", id)
-        .order("created_at", { ascending: true });
+    if (timeVotesResult.error) {
+        throw new Error(timeVotesResult.error.message);
+    }
 
-    if (placeOptionsError) throw new Error(placeOptionsError.message);
+    if (placeVotesResult.error) {
+        throw new Error(placeVotesResult.error.message);
+    }
 
-    const { data: participantsData, error: participantsError } = await supabase
-        .from("participants")
-        .select("*")
-        .eq("event_id", id)
-        .order("created_at", { ascending: true });
-
-    if (participantsError) throw new Error(participantsError.message);
-
-    const { data: timeVotesData } = await supabase
-        .from("time_votes")
-        .select("*")
-        .eq("event_id", id);
-
-    const { data: placeVotesData } = await supabase
-        .from("place_votes")
-        .select("*")
-        .eq("event_id", id);
-
-    const timeOptions = (timeOptionsData ?? []) as TimeOption[];
-    const placeOptions = (placeOptionsData ?? []) as PlaceOption[];
-    const participants = (participantsData ?? []) as Participant[];
-    const allTimeVotes = (timeVotesData ?? []) as TimeVote[];
-    const allPlaceVotes = (placeVotesData ?? []) as PlaceVote[];
+    const event = eventData as EventRecord;
+    const timeOptions = (timeOptionsResult.data ?? []) as TimeOption[];
+    const placeOptions = (placeOptionsResult.data ?? []) as PlaceOption[];
+    const participants = (participantsResult.data ?? []) as Participant[];
+    const allTimeVotes = (timeVotesResult.data ?? []) as TimeVote[];
+    const allPlaceVotes = (placeVotesResult.data ?? []) as PlaceVote[];
 
     const rankedTimeOptions = timeOptions
         .map((option) => ({
@@ -570,7 +576,23 @@ export default async function EventDetailsPage({
                         )}
                     </div>
                 )}
+                <div className="mt-8">
+                    <div className="mb-4">
+                        <div className="mb-2 inline-flex rounded-2xl bg-indigo-700/10 px-3 py-1 text-sm font-medium text-indigo-800">
+                            Mapa miejsc
+                        </div>
 
+                        <h2 className="text-2xl font-bold text-slate-900">
+                            Lokalizacje propozycji
+                        </h2>
+
+                        <p className="mt-2 text-sm text-slate-700">
+                            Na mapie pojawią się miejsca, które mają zapisane współrzędne z Mapboxa.
+                        </p>
+                    </div>
+
+                    <EventPlacesMap places={placeOptions} />
+                </div>
                 <div className="mt-8 grid gap-6 lg:grid-cols-3">
                     <section className="rounded-3xl border border-white/40 bg-white/35 p-6 backdrop-blur-2xl shadow-[0_20px_70px_rgba(30,64,175,0.10)]">
                         <div className="mb-5">
@@ -720,12 +742,7 @@ export default async function EventDetailsPage({
                                     Adres opcjonalnie
                                 </label>
 
-                                <input
-                                    name="address"
-                                    disabled={!canEditSetup}
-                                    placeholder="Np. ul. Długa 10, Warszawa"
-                                    className="w-full rounded-2xl border border-white/60 bg-white/70 px-4 py-3 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-600 focus:ring-4 focus:ring-blue-600/10 disabled:opacity-50"
-                                />
+                                <MapboxAddressInput disabled={!canEditSetup} />
                             </div>
 
                             <button

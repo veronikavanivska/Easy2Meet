@@ -1,10 +1,9 @@
 import Link from "next/link";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { StatusMessage } from "../../components/StatusMessage";
+import { EventPlacesMap } from "../../components/event-places-map";
 import {
     identifyParticipantAction,
-    proposePlaceOptionAction,
-    proposeTimeOptionAction,
     voteForPlaceAction,
     voteForTimeAction,
 } from "./actions";
@@ -41,6 +40,9 @@ type PlaceOption = {
     event_id: string;
     name: string;
     address: string | null;
+    latitude: number | null;
+    longitude: number | null;
+    mapbox_id?: string | null;
 };
 
 type Participant = {
@@ -84,28 +86,15 @@ function voteBadgeClass(vote: string | null | undefined) {
     return "bg-slate-100 text-slate-600 border-slate-200";
 }
 
-async function closeEventIfDeadlinePassed<T extends EventRecord>(
-    event: T
-): Promise<T> {
-    if (event.status !== "voting") return event;
-    if (!event.voting_deadline) return event;
+function formatTimeOption(option: TimeOption) {
+    const start = new Date(option.starts_at).toLocaleString("pl-PL");
 
-    const deadline = new Date(event.voting_deadline);
+    if (!option.ends_at) {
+        return start;
+    }
 
-    if (deadline > new Date()) return event;
-
-    const supabase = createSupabaseAdminClient();
-
-    const { data: updatedEvent } = await supabase
-        .from("events")
-        .update({
-            status: "closed",
-        })
-        .eq("id", event.id)
-        .select("*")
-        .single();
-
-    return (updatedEvent as T | null) ?? event;
+    const end = new Date(option.ends_at).toLocaleString("pl-PL");
+    return `${start} — ${end}`;
 }
 
 export default async function VotePage({ params, searchParams }: PageProps) {
@@ -117,16 +106,15 @@ export default async function VotePage({ params, searchParams }: PageProps) {
     } = await searchParams;
 
     const participantEmail = participantEmailRaw?.trim().toLowerCase() || "";
-
     const supabase = createSupabaseAdminClient();
 
-    const { data: eventData } = await supabase
+    const { data: eventData, error: eventError } = await supabase
         .from("events")
         .select("*")
         .eq("public_token", token)
         .single();
 
-    if (!eventData) {
+    if (eventError || !eventData) {
         return (
             <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
                 <div className="rounded-3xl border bg-white p-8 shadow-sm">
@@ -150,54 +138,77 @@ export default async function VotePage({ params, searchParams }: PageProps) {
         );
     }
 
-    const event = await closeEventIfDeadlinePassed(eventData as EventRecord);
+    const event = eventData as EventRecord;
 
-    const { data: timeOptionsData } = await supabase
-        .from("time_options")
-        .select("*")
-        .eq("event_id", event.id)
-        .order("starts_at", { ascending: true });
+    const [timeOptionsResult, placeOptionsResult, participantResult] =
+        await Promise.all([
+            supabase
+                .from("time_options")
+                .select("*")
+                .eq("event_id", event.id)
+                .order("starts_at", { ascending: true }),
 
-    const { data: placeOptionsData } = await supabase
-        .from("place_options")
-        .select("*")
-        .eq("event_id", event.id)
-        .order("created_at", { ascending: true });
+            supabase
+                .from("place_options")
+                .select("*")
+                .eq("event_id", event.id)
+                .order("created_at", { ascending: true }),
 
-    const timeOptions = (timeOptionsData ?? []) as TimeOption[];
-    const placeOptions = (placeOptionsData ?? []) as PlaceOption[];
+            participantEmail
+                ? supabase
+                    .from("participants")
+                    .select("*")
+                    .eq("event_id", event.id)
+                    .eq("email", participantEmail)
+                    .maybeSingle()
+                : Promise.resolve({ data: null, error: null }),
+        ]);
 
-    let participant: Participant | null = null;
-
-    if (participantEmail) {
-        const { data } = await supabase
-            .from("participants")
-            .select("*")
-            .eq("event_id", event.id)
-            .eq("email", participantEmail)
-            .maybeSingle();
-
-        participant = (data as Participant | null) ?? null;
+    if (timeOptionsResult.error) {
+        throw new Error(timeOptionsResult.error.message);
     }
 
-    const { data: timeVotesData } = participant
-        ? await supabase
-            .from("time_votes")
-            .select("*")
-            .eq("event_id", event.id)
-            .eq("participant_id", participant.id)
-        : { data: [] };
+    if (placeOptionsResult.error) {
+        throw new Error(placeOptionsResult.error.message);
+    }
 
-    const { data: placeVotesData } = participant
-        ? await supabase
-            .from("place_votes")
-            .select("*")
-            .eq("event_id", event.id)
-            .eq("participant_id", participant.id)
-        : { data: [] };
+    if (participantResult.error) {
+        throw new Error(participantResult.error.message);
+    }
 
-    const timeVotes = (timeVotesData ?? []) as TimeVote[];
-    const placeVotes = (placeVotesData ?? []) as PlaceVote[];
+    const timeOptions = (timeOptionsResult.data ?? []) as TimeOption[];
+    const placeOptions = (placeOptionsResult.data ?? []) as PlaceOption[];
+    const participant = (participantResult.data as Participant | null) ?? null;
+
+    const [timeVotesResult, placeVotesResult] = participant
+        ? await Promise.all([
+            supabase
+                .from("time_votes")
+                .select("*")
+                .eq("event_id", event.id)
+                .eq("participant_id", participant.id),
+
+            supabase
+                .from("place_votes")
+                .select("*")
+                .eq("event_id", event.id)
+                .eq("participant_id", participant.id),
+        ])
+        : [
+            { data: [], error: null },
+            { data: [], error: null },
+        ];
+
+    if (timeVotesResult.error) {
+        throw new Error(timeVotesResult.error.message);
+    }
+
+    if (placeVotesResult.error) {
+        throw new Error(placeVotesResult.error.message);
+    }
+
+    const timeVotes = (timeVotesResult.data ?? []) as TimeVote[];
+    const placeVotes = (placeVotesResult.data ?? []) as PlaceVote[];
 
     const votedTimeOptionIds = new Set(
         timeVotes.map((vote) => vote.time_option_id)
@@ -221,7 +232,7 @@ export default async function VotePage({ params, searchParams }: PageProps) {
     const hasCompletedVoting = hasCompletedTimeVoting && hasCompletedPlaceVoting;
 
     const canVote = event.status === "voting";
-    const isClosed = event.status === "closed";
+    const isClosed = event.status === "closed" || event.status === "finalized";
     const isDraft = event.status === "draft";
 
     return (
@@ -246,7 +257,7 @@ export default async function VotePage({ params, searchParams }: PageProps) {
                     durationMs={4000}
                 />
 
-                <div className="mt-6 rounded-3xl border border-white/40 bg-white/35 p-8 backdrop-blur-2xl shadow-[0_20px_70px_rgba(30,64,175,0.12)]">
+                <div className="mt-6 rounded-3xl border border-white/40 bg-white/35 p-8 shadow-[0_20px_70px_rgba(30,64,175,0.12)] backdrop-blur-2xl">
                     <div className="mb-3 inline-flex rounded-2xl bg-blue-700/10 px-3 py-1 text-sm font-medium text-blue-800">
                         Status: {event.status}
                     </div>
@@ -280,7 +291,7 @@ export default async function VotePage({ params, searchParams }: PageProps) {
                     )}
                 </div>
 
-                <div className="mt-8 rounded-3xl border border-white/40 bg-white/35 p-6 backdrop-blur-2xl shadow-[0_20px_70px_rgba(30,64,175,0.10)]">
+                <div className="mt-8 rounded-3xl border border-white/40 bg-white/35 p-6 shadow-[0_20px_70px_rgba(30,64,175,0.10)] backdrop-blur-2xl">
                     <div className="mb-5">
                         <div className="mb-2 inline-flex rounded-2xl bg-sky-700/10 px-3 py-1 text-sm font-medium text-sky-800">
                             Identyfikacja uczestnika
@@ -320,8 +331,8 @@ export default async function VotePage({ params, searchParams }: PageProps) {
                             <p>
                                 Głosujesz jako:{" "}
                                 <span className="font-semibold">
-                  {participant.display_name} ({participant.email})
-                </span>
+                                    {participant.display_name} ({participant.email})
+                                </span>
                             </p>
 
                             <p className="mt-2 font-semibold">Postęp głosowania:</p>
@@ -352,19 +363,36 @@ export default async function VotePage({ params, searchParams }: PageProps) {
                 </div>
 
                 {!participant ? (
-                    <div className="mt-8 rounded-3xl border border-white/40 bg-white/35 p-10 text-center backdrop-blur-2xl shadow-[0_20px_70px_rgba(30,64,175,0.10)]">
+                    <div className="mt-8 rounded-3xl border border-white/40 bg-white/35 p-10 text-center shadow-[0_20px_70px_rgba(30,64,175,0.10)] backdrop-blur-2xl">
                         <h2 className="text-xl font-bold text-slate-900">
                             Najpierw potwierdź e-mail
                         </h2>
 
                         <p className="mt-2 text-slate-700">
-                            Po potwierdzeniu e-maila pojawią się opcje głosowania i dodawania
-                            własnych propozycji.
+                            Po potwierdzeniu e-maila pojawią się opcje głosowania.
                         </p>
                     </div>
                 ) : (
                     <>
-                        <div className="mt-8 rounded-3xl border border-white/40 bg-white/35 p-5 text-sm text-slate-700 backdrop-blur-2xl shadow-[0_20px_70px_rgba(30,64,175,0.10)]">
+                        <div className="mt-8 rounded-3xl border border-white/40 bg-white/35 p-6 shadow-[0_20px_70px_rgba(30,64,175,0.10)] backdrop-blur-2xl">
+                            <div className="mb-4">
+                                <div className="mb-2 inline-flex rounded-2xl bg-indigo-700/10 px-3 py-1 text-sm font-medium text-indigo-800">
+                                    Mapa miejsc
+                                </div>
+
+                                <h2 className="text-xl font-bold text-slate-900">
+                                    Zobacz lokalizacje propozycji
+                                </h2>
+
+                                <p className="mt-2 text-sm text-slate-700">
+                                    Na mapie widzisz miejsca dodane przez organizatora.
+                                </p>
+                            </div>
+
+                            <EventPlacesMap places={placeOptions} />
+                        </div>
+
+                        <div className="mt-8 rounded-3xl border border-white/40 bg-white/35 p-5 text-sm text-slate-700 shadow-[0_20px_70px_rgba(30,64,175,0.10)] backdrop-blur-2xl">
                             <p className="font-semibold text-slate-900">Twój postęp</p>
 
                             <p className="mt-1">
@@ -374,7 +402,7 @@ export default async function VotePage({ params, searchParams }: PageProps) {
                         </div>
 
                         <div className="mt-8 grid gap-6 lg:grid-cols-2">
-                            <section className="rounded-3xl border border-white/40 bg-white/35 p-6 backdrop-blur-2xl shadow-[0_20px_70px_rgba(30,64,175,0.10)]">
+                            <section className="rounded-3xl border border-white/40 bg-white/35 p-6 shadow-[0_20px_70px_rgba(30,64,175,0.10)] backdrop-blur-2xl">
                                 <div className="mb-5">
                                     <div className="mb-2 inline-flex rounded-2xl bg-blue-700/10 px-3 py-1 text-sm font-medium text-blue-800">
                                         Terminy
@@ -388,46 +416,6 @@ export default async function VotePage({ params, searchParams }: PageProps) {
                                         Oceń każdy termin: Tak / Może / Nie.
                                     </p>
                                 </div>
-
-                                <form
-                                    action={proposeTimeOptionAction}
-                                    className="mb-6 rounded-2xl border border-white/50 bg-white/40 p-4 backdrop-blur-xl"
-                                >
-                                    <input type="hidden" name="token" value={token} />
-                                    <input
-                                        type="hidden"
-                                        name="participantEmail"
-                                        value={participant.email}
-                                    />
-
-                                    <h3 className="font-semibold text-slate-900">
-                                        Zaproponuj inny termin
-                                    </h3>
-
-                                    <div className="mt-4 space-y-3">
-                                        <input
-                                            name="startsAt"
-                                            type="datetime-local"
-                                            required
-                                            disabled={!canVote}
-                                            className="w-full rounded-2xl border border-white/60 bg-white/70 px-4 py-3 text-slate-900 outline-none transition focus:border-blue-600 focus:ring-4 focus:ring-blue-600/10 disabled:opacity-50"
-                                        />
-
-                                        <input
-                                            name="endsAt"
-                                            type="datetime-local"
-                                            disabled={!canVote}
-                                            className="w-full rounded-2xl border border-white/60 bg-white/70 px-4 py-3 text-slate-900 outline-none transition focus:border-blue-600 focus:ring-4 focus:ring-blue-600/10 disabled:opacity-50"
-                                        />
-
-                                        <button
-                                            disabled={!canVote}
-                                            className="w-full rounded-2xl bg-blue-700 px-4 py-3 font-semibold text-white shadow-[0_10px_30px_rgba(29,78,216,0.30)] transition hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50"
-                                        >
-                                            Dodaj propozycję terminu
-                                        </button>
-                                    </div>
-                                </form>
 
                                 <div className="space-y-4">
                                     {timeOptions.length === 0 ? (
@@ -448,19 +436,8 @@ export default async function VotePage({ params, searchParams }: PageProps) {
                                                     <div className="flex flex-col justify-between gap-3 md:flex-row md:items-start">
                                                         <div>
                                                             <p className="font-semibold text-slate-900">
-                                                                {new Date(option.starts_at).toLocaleString(
-                                                                    "pl-PL"
-                                                                )}
+                                                                {formatTimeOption(option)}
                                                             </p>
-
-                                                            {option.ends_at && (
-                                                                <p className="mt-1 text-sm text-slate-600">
-                                                                    Do:{" "}
-                                                                    {new Date(option.ends_at).toLocaleString(
-                                                                        "pl-PL"
-                                                                    )}
-                                                                </p>
-                                                            )}
                                                         </div>
 
                                                         <span
@@ -468,8 +445,8 @@ export default async function VotePage({ params, searchParams }: PageProps) {
                                                                 existingVote?.vote
                                                             )}`}
                                                         >
-                              {voteLabel(existingVote?.vote)}
-                            </span>
+                                                            {voteLabel(existingVote?.vote)}
+                                                        </span>
                                                     </div>
 
                                                     <form
@@ -532,7 +509,7 @@ export default async function VotePage({ params, searchParams }: PageProps) {
                                 </div>
                             </section>
 
-                            <section className="rounded-3xl border border-white/40 bg-white/35 p-6 backdrop-blur-2xl shadow-[0_20px_70px_rgba(30,64,175,0.10)]">
+                            <section className="rounded-3xl border border-white/40 bg-white/35 p-6 shadow-[0_20px_70px_rgba(30,64,175,0.10)] backdrop-blur-2xl">
                                 <div className="mb-5">
                                     <div className="mb-2 inline-flex rounded-2xl bg-indigo-700/10 px-3 py-1 text-sm font-medium text-indigo-800">
                                         Miejsca
@@ -546,46 +523,6 @@ export default async function VotePage({ params, searchParams }: PageProps) {
                                         Oceń każde miejsce: Tak / Może / Nie.
                                     </p>
                                 </div>
-
-                                <form
-                                    action={proposePlaceOptionAction}
-                                    className="mb-6 rounded-2xl border border-white/50 bg-white/40 p-4 backdrop-blur-xl"
-                                >
-                                    <input type="hidden" name="token" value={token} />
-                                    <input
-                                        type="hidden"
-                                        name="participantEmail"
-                                        value={participant.email}
-                                    />
-
-                                    <h3 className="font-semibold text-slate-900">
-                                        Zaproponuj inne miejsce
-                                    </h3>
-
-                                    <div className="mt-4 space-y-3">
-                                        <input
-                                            name="name"
-                                            required
-                                            disabled={!canVote}
-                                            placeholder="Nazwa miejsca"
-                                            className="w-full rounded-2xl border border-white/60 bg-white/70 px-4 py-3 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-600 focus:ring-4 focus:ring-blue-600/10 disabled:opacity-50"
-                                        />
-
-                                        <input
-                                            name="address"
-                                            disabled={!canVote}
-                                            placeholder="Adres opcjonalnie"
-                                            className="w-full rounded-2xl border border-white/60 bg-white/70 px-4 py-3 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-600 focus:ring-4 focus:ring-blue-600/10 disabled:opacity-50"
-                                        />
-
-                                        <button
-                                            disabled={!canVote}
-                                            className="w-full rounded-2xl bg-blue-700 px-4 py-3 font-semibold text-white shadow-[0_10px_30px_rgba(29,78,216,0.30)] transition hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50"
-                                        >
-                                            Dodaj propozycję miejsca
-                                        </button>
-                                    </div>
-                                </form>
 
                                 <div className="space-y-4">
                                     {placeOptions.length === 0 ? (
@@ -621,8 +558,8 @@ export default async function VotePage({ params, searchParams }: PageProps) {
                                                                 existingVote?.vote
                                                             )}`}
                                                         >
-                              {voteLabel(existingVote?.vote)}
-                            </span>
+                                                            {voteLabel(existingVote?.vote)}
+                                                        </span>
                                                     </div>
 
                                                     <form
