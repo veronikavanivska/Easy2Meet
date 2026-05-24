@@ -2,8 +2,11 @@ import Link from "next/link";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { StatusMessage } from "../../components/StatusMessage";
 import { EventPlacesMap } from "../../components/event-places-map";
+import { MapboxPlacePicker } from "../../components/mapbox-place-picker";
 import {
     identifyParticipantAction,
+    proposePlaceOptionAction,
+    proposeTimeOptionAction,
     voteForPlaceAction,
     voteForTimeAction,
 } from "./actions";
@@ -97,6 +100,18 @@ function formatTimeOption(option: TimeOption) {
     return `${start} — ${end}`;
 }
 
+
+function getEffectiveEventStatus(event: EventRecord) {
+    if (event.status !== "voting") return event.status;
+    if (!event.voting_deadline) return event.status;
+
+    const deadline = new Date(event.voting_deadline);
+
+    if (Number.isNaN(deadline.getTime())) return event.status;
+
+    return deadline <= new Date() ? "closed" : event.status;
+}
+
 export default async function VotePage({ params, searchParams }: PageProps) {
     const { token } = await params;
     const {
@@ -138,7 +153,11 @@ export default async function VotePage({ params, searchParams }: PageProps) {
         );
     }
 
-    const event = eventData as EventRecord;
+    const eventRaw = eventData as EventRecord;
+    const event = {
+        ...eventRaw,
+        status: getEffectiveEventStatus(eventRaw),
+    };
 
     const [timeOptionsResult, placeOptionsResult, participantResult] =
         await Promise.all([
@@ -156,11 +175,11 @@ export default async function VotePage({ params, searchParams }: PageProps) {
 
             participantEmail
                 ? supabase
-                    .from("participants")
-                    .select("*")
-                    .eq("event_id", event.id)
-                    .eq("email", participantEmail)
-                    .maybeSingle()
+                      .from("participants")
+                      .select("*")
+                      .eq("event_id", event.id)
+                      .eq("email", participantEmail)
+                      .maybeSingle()
                 : Promise.resolve({ data: null, error: null }),
         ]);
 
@@ -182,22 +201,22 @@ export default async function VotePage({ params, searchParams }: PageProps) {
 
     const [timeVotesResult, placeVotesResult] = participant
         ? await Promise.all([
-            supabase
-                .from("time_votes")
-                .select("*")
-                .eq("event_id", event.id)
-                .eq("participant_id", participant.id),
+              supabase
+                  .from("time_votes")
+                  .select("*")
+                  .eq("event_id", event.id)
+                  .eq("participant_id", participant.id),
 
-            supabase
-                .from("place_votes")
-                .select("*")
-                .eq("event_id", event.id)
-                .eq("participant_id", participant.id),
-        ])
+              supabase
+                  .from("place_votes")
+                  .select("*")
+                  .eq("event_id", event.id)
+                  .eq("participant_id", participant.id),
+          ])
         : [
-            { data: [], error: null },
-            { data: [], error: null },
-        ];
+              { data: [], error: null },
+              { data: [], error: null },
+          ];
 
     if (timeVotesResult.error) {
         throw new Error(timeVotesResult.error.message);
@@ -417,6 +436,50 @@ export default async function VotePage({ params, searchParams }: PageProps) {
                                     </p>
                                 </div>
 
+                                <form
+                                    action={proposeTimeOptionAction}
+                                    className="mb-6 rounded-2xl border border-white/50 bg-white/40 p-4 backdrop-blur-xl"
+                                >
+                                    <input type="hidden" name="token" value={token} />
+                                    <input
+                                        type="hidden"
+                                        name="participantEmail"
+                                        value={participant.email}
+                                    />
+
+                                    <h3 className="font-semibold text-slate-900">
+                                        Zaproponuj inny termin
+                                    </h3>
+
+                                    <p className="mt-1 text-sm text-slate-600">
+                                        Twoja propozycja pojawi się u wszystkich uczestników po zapisaniu.
+                                    </p>
+
+                                    <div className="mt-4 space-y-3">
+                                        <input
+                                            name="startsAt"
+                                            type="datetime-local"
+                                            required
+                                            disabled={!canVote}
+                                            className="w-full rounded-2xl border border-white/60 bg-white/70 px-4 py-3 text-slate-900 outline-none transition focus:border-blue-600 focus:ring-4 focus:ring-blue-600/10 disabled:opacity-50"
+                                        />
+
+                                        <input
+                                            name="endsAt"
+                                            type="datetime-local"
+                                            disabled={!canVote}
+                                            className="w-full rounded-2xl border border-white/60 bg-white/70 px-4 py-3 text-slate-900 outline-none transition focus:border-blue-600 focus:ring-4 focus:ring-blue-600/10 disabled:opacity-50"
+                                        />
+
+                                        <button
+                                            disabled={!canVote}
+                                            className="w-full rounded-2xl bg-blue-700 px-4 py-3 font-semibold text-white shadow-[0_10px_30px_rgba(29,78,216,0.30)] transition hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50"
+                                        >
+                                            Dodaj propozycję terminu
+                                        </button>
+                                    </div>
+                                </form>
+
                                 <div className="space-y-4">
                                     {timeOptions.length === 0 ? (
                                         <p className="rounded-2xl border border-white/50 bg-white/40 p-4 text-sm text-slate-600">
@@ -523,6 +586,45 @@ export default async function VotePage({ params, searchParams }: PageProps) {
                                         Oceń każde miejsce: Tak / Może / Nie.
                                     </p>
                                 </div>
+
+                                <form
+                                    action={proposePlaceOptionAction}
+                                    className="mb-6 rounded-2xl border border-white/50 bg-white/40 p-4 backdrop-blur-xl"
+                                >
+                                    <input type="hidden" name="token" value={token} />
+                                    <input
+                                        type="hidden"
+                                        name="participantEmail"
+                                        value={participant.email}
+                                    />
+
+                                    <h3 className="font-semibold text-slate-900">
+                                        Zaproponuj inne miejsce
+                                    </h3>
+
+                                    <p className="mt-1 text-sm text-slate-600">
+                                        Po dodaniu miejsca inni uczestnicy dostaną e-mail z linkiem do głosowania.
+                                    </p>
+
+                                    <div className="mt-4 space-y-3">
+                                        <input
+                                            name="name"
+                                            required
+                                            disabled={!canVote}
+                                            placeholder="Nazwa miejsca"
+                                            className="w-full rounded-2xl border border-white/60 bg-white/70 px-4 py-3 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-600 focus:ring-4 focus:ring-blue-600/10 disabled:opacity-50"
+                                        />
+
+                                        <MapboxPlacePicker disabled={!canVote} />
+
+                                        <button
+                                            disabled={!canVote}
+                                            className="w-full rounded-2xl bg-blue-700 px-4 py-3 font-semibold text-white shadow-[0_10px_30px_rgba(29,78,216,0.30)] transition hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50"
+                                        >
+                                            Dodaj propozycję miejsca
+                                        </button>
+                                    </div>
+                                </form>
 
                                 <div className="space-y-4">
                                     {placeOptions.length === 0 ? (

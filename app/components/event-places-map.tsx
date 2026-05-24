@@ -16,9 +16,12 @@ type EventPlacesMapProps = {
     places: MapPlace[];
 };
 
+const POLAND_CENTER: [number, number] = [19.1451, 51.9194];
+
 export function EventPlacesMap({ places }: EventPlacesMapProps) {
     const mapContainerRef = useRef<HTMLDivElement | null>(null);
     const mapRef = useRef<mapboxgl.Map | null>(null);
+    const markersRef = useRef<mapboxgl.Marker[]>([]);
 
     const placesWithCoordinates = useMemo(
         () =>
@@ -36,7 +39,6 @@ export function EventPlacesMap({ places }: EventPlacesMapProps) {
         if (!accessToken) return;
         if (!mapContainerRef.current) return;
         if (mapRef.current) return;
-        if (placesWithCoordinates.length === 0) return;
 
         mapboxgl.accessToken = accessToken;
 
@@ -45,18 +47,37 @@ export function EventPlacesMap({ places }: EventPlacesMapProps) {
         const map = new mapboxgl.Map({
             container: mapContainerRef.current,
             style: "mapbox://styles/mapbox/streets-v12",
-            center: [
-                firstPlace.longitude as number,
-                firstPlace.latitude as number,
-            ],
-            zoom: 12,
+            center: firstPlace
+                ? [firstPlace.longitude as number, firstPlace.latitude as number]
+                : POLAND_CENTER,
+            zoom: firstPlace ? 12 : 5,
         });
 
         map.addControl(new mapboxgl.NavigationControl(), "top-right");
+        mapRef.current = map;
+
+        return () => {
+            markersRef.current.forEach((marker) => marker.remove());
+            markersRef.current = [];
+            map.remove();
+            mapRef.current = null;
+        };
+    }, [placesWithCoordinates]);
+
+    useEffect(() => {
+        const map = mapRef.current;
+
+        if (!map) return;
+
+        markersRef.current.forEach((marker) => marker.remove());
+        markersRef.current = [];
+
+        if (placesWithCoordinates.length === 0) return;
 
         placesWithCoordinates.forEach((place) => {
             const popupContainer = document.createElement("div");
             popupContainer.style.fontFamily = "Arial, sans-serif";
+            popupContainer.style.maxWidth = "220px";
 
             const title = document.createElement("strong");
             title.textContent = place.name;
@@ -73,37 +94,36 @@ export function EventPlacesMap({ places }: EventPlacesMapProps) {
                 popupContainer
             );
 
-            new mapboxgl.Marker()
-                .setLngLat([
-                    place.longitude as number,
-                    place.latitude as number,
-                ])
+            const marker = new mapboxgl.Marker()
+                .setLngLat([place.longitude as number, place.latitude as number])
                 .setPopup(popup)
                 .addTo(map);
+
+            markersRef.current.push(marker);
         });
 
-        if (placesWithCoordinates.length > 1) {
-            const bounds = new mapboxgl.LngLatBounds();
+        if (placesWithCoordinates.length === 1) {
+            const place = placesWithCoordinates[0];
 
-            placesWithCoordinates.forEach((place) => {
-                bounds.extend([
-                    place.longitude as number,
-                    place.latitude as number,
-                ]);
+            map.flyTo({
+                center: [place.longitude as number, place.latitude as number],
+                zoom: 14,
+                essential: true,
             });
 
-            map.fitBounds(bounds, {
-                padding: 70,
-                maxZoom: 14,
-            });
+            return;
         }
 
-        mapRef.current = map;
+        const bounds = new mapboxgl.LngLatBounds();
 
-        return () => {
-            map.remove();
-            mapRef.current = null;
-        };
+        placesWithCoordinates.forEach((place) => {
+            bounds.extend([place.longitude as number, place.latitude as number]);
+        });
+
+        map.fitBounds(bounds, {
+            padding: 70,
+            maxZoom: 14,
+        });
     }, [placesWithCoordinates]);
 
     if (!process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN) {
@@ -117,7 +137,7 @@ export function EventPlacesMap({ places }: EventPlacesMapProps) {
     if (placesWithCoordinates.length === 0) {
         return (
             <div className="rounded-2xl border border-white/50 bg-white/40 p-5 text-sm text-slate-600">
-                Dodaj miejsce z adresem wybranym z Mapboxa, aby zobaczyć marker na mapie.
+                Brak miejsc z zapisanymi współrzędnymi. Dodaj miejsce przez Mapbox, aby zobaczyć marker.
             </div>
         );
     }

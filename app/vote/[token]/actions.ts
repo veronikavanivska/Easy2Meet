@@ -3,6 +3,7 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { getAppUrl, sendEmail } from "@/lib/email";
 
 function normalizeEmail(email: string) {
     return email.trim().toLowerCase();
@@ -27,6 +28,10 @@ function buildVoteUrl(
     return query ? `/vote/${token}?${query}` : `/vote/${token}`;
 }
 
+function buildAbsoluteVoteUrl(token: string, email?: string) {
+    return `${getAppUrl()}${buildVoteUrl(token, { email })}`;
+}
+
 function redirectWithError(
     token: string,
     message: string,
@@ -45,9 +50,66 @@ function redirectWithSuccess(
 
 type EventRecord = {
     id: string;
+    title?: string;
     status: string;
+    public_token?: string;
     voting_deadline: string | null;
 };
+
+type ParticipantRow = {
+    id: string;
+    display_name: string | null;
+    email: string | null;
+};
+
+type EmailInput = {
+    to: string;
+    subject: string;
+    html: string;
+};
+
+function isVotingExpired(event: {
+    status: string;
+    voting_deadline: string | null;
+}) {
+    if (event.status !== "voting") return false;
+    if (!event.voting_deadline) return false;
+
+    const deadline = new Date(event.voting_deadline);
+
+    if (Number.isNaN(deadline.getTime())) return false;
+
+    return deadline <= new Date();
+}
+
+
+function sendEmailsInBackground(emails: EmailInput[]) {
+    if (emails.length === 0) return;
+
+    void Promise.allSettled(
+        emails.map((email) =>
+            sendEmail({
+                to: email.to,
+                subject: email.subject,
+                html: email.html,
+            })
+        )
+    ).then((results) => {
+        const failed = results.filter((result) => result.status === "rejected");
+
+        if (failed.length > 0) {
+            console.error("Failed to send proposal notification emails:", failed);
+        }
+    });
+}
+
+function formatTimeRange(startsAt: Date, endsAt: Date | null) {
+    const startText = startsAt.toLocaleString("pl-PL");
+
+    if (!endsAt) return startText;
+
+    return `${startText} — ${endsAt.toLocaleString("pl-PL")}`;
+}
 
 async function closeEventIfDeadlinePassed<T extends EventRecord>(
     event: T
@@ -78,13 +140,13 @@ async function getEventByToken(token: string) {
 
     const { data: event, error } = await supabase
         .from("events")
-        .select("*")
+        .select("id, title, status, public_token, voting_deadline")
         .eq("public_token", token)
         .single();
 
     if (error || !event) return null;
 
-    return await closeEventIfDeadlinePassed(event as EventRecord & Record<string, unknown>);
+    return await closeEventIfDeadlinePassed(event as EventRecord);
 }
 
 async function getParticipantByEmail(eventId: string, email: string) {
@@ -99,7 +161,131 @@ async function getParticipantByEmail(eventId: string, email: string) {
 
     if (error || !participant) return null;
 
-    return participant;
+    return participant as ParticipantRow;
+}
+
+async function getOtherParticipants(eventId: string, currentParticipantId: string) {
+    const supabase = createSupabaseAdminClient();
+
+    const { data, error } = await supabase
+        .from("participants")
+        .select("id, display_name, email")
+        .eq("event_id", eventId)
+        .neq("id", currentParticipantId);
+
+    if (error || !data) return [];
+
+    return data as ParticipantRow[];
+}
+
+function buildNewTimeEmail(input: {
+    eventTitle: string;
+    participantName: string | null;
+    proposedTime: string;
+    voteUrl: string;
+}) {
+    return `
+        <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #0f172a;">
+            <div style="max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 16px; background: #ffffff;">
+                <h1 style="margin: 0 0 16px; color: #1d4ed8;">Easy2Meet</h1>
+
+                <p>Cześć${input.participantName ? ` ${input.participantName}` : ""},</p>
+
+                <p>W wydarzeniu pojawiła się nowa propozycja terminu:</p>
+
+                <h2 style="margin: 16px 0; color: #0f172a;">${input.eventTitle}</h2>
+
+                <div style="margin: 20px 0; padding: 16px; border-radius: 12px; background: #eff6ff;">
+                    <p style="margin: 0; color: #1d4ed8; font-weight: bold;">Nowy termin</p>
+                    <p style="margin: 8px 0 0; font-size: 16px;"><strong>${input.proposedTime}</strong></p>
+                </div>
+
+                <p>Wejdź w głosowanie i oceń nowy termin:</p>
+
+                <p style="margin: 24px 0;">
+                    <a href="${input.voteUrl}"
+                       style="display: inline-block; background: #1d4ed8; color: #ffffff; padding: 12px 20px; border-radius: 10px; text-decoration: none; font-weight: bold;">
+                        Przejdź do głosowania
+                    </a>
+                </p>
+
+                <p style="font-size: 14px; color: #64748b;">Jeśli przycisk nie działa, skopiuj ten link:</p>
+                <p style="font-size: 14px; word-break: break-all;">${input.voteUrl}</p>
+
+                <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;" />
+
+                <p style="font-size: 12px; color: #64748b;">
+                    Ta wiadomość została wysłana automatycznie przez Easy2Meet.
+                </p>
+            </div>
+        </div>
+    `;
+}
+
+function buildStaticMapUrl(latitude: number | null, longitude: number | null) {
+    const accessToken = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN;
+
+    if (!accessToken) return null;
+    if (latitude === null || longitude === null) return null;
+
+    return `https://api.mapbox.com/styles/v1/mapbox/streets-v12/static/pin-s+1d4ed8(${longitude},${latitude})/${longitude},${latitude},14,0/600x260@2x?access_token=${accessToken}`;
+}
+
+function buildNewPlaceEmail(input: {
+    eventTitle: string;
+    participantName: string | null;
+    placeName: string;
+    placeAddress: string | null;
+    mapImageUrl: string | null;
+    voteUrl: string;
+}) {
+    return `
+        <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #0f172a;">
+            <div style="max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 16px; background: #ffffff;">
+                <h1 style="margin: 0 0 16px; color: #1d4ed8;">Easy2Meet</h1>
+
+                <p>Cześć${input.participantName ? ` ${input.participantName}` : ""},</p>
+
+                <p>W wydarzeniu pojawiła się nowa propozycja miejsca:</p>
+
+                <h2 style="margin: 16px 0; color: #0f172a;">${input.eventTitle}</h2>
+
+                <div style="margin: 20px 0; padding: 16px; border-radius: 12px; background: #eff6ff;">
+                    <p style="margin: 0; color: #1d4ed8; font-weight: bold;">Nowe miejsce</p>
+                    <p style="margin: 8px 0 0; font-size: 16px;"><strong>${input.placeName}</strong></p>
+                    ${
+                        input.placeAddress
+                            ? `<p style="margin: 6px 0 0; color: #475569;">${input.placeAddress}</p>`
+                            : ""
+                    }
+                </div>
+
+                ${
+                    input.mapImageUrl
+                        ? `<img src="${input.mapImageUrl}" alt="Mapa miejsca" style="display: block; width: 100%; max-width: 600px; border-radius: 14px; border: 1px solid #e2e8f0; margin: 18px 0;" />`
+                        : ""
+                }
+
+                <p>Wejdź w głosowanie i oceń nowe miejsce:</p>
+
+                <p style="margin: 24px 0;">
+                    <a href="${input.voteUrl}"
+                       style="display: inline-block; background: #1d4ed8; color: #ffffff; padding: 12px 20px; border-radius: 10px; text-decoration: none; font-weight: bold;">
+                        Przejdź do głosowania
+                    </a>
+                </p>
+
+                <p style="font-size: 14px; color: #64748b;">Jeśli przycisk nie działa, skopiuj ten link:</p>
+                <p style="font-size: 14px; word-break: break-all;">${input.voteUrl}</p>
+
+                <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;" />
+
+                <p style="font-size: 12px; color: #64748b;">
+                    Ta wiadomość została wysłana automatycznie przez Easy2Meet.
+                </p>
+            </div>
+        </div>
+    `;
 }
 
 async function closeEventIfEveryoneVoted(eventId: string) {
@@ -111,65 +297,46 @@ async function closeEventIfEveryoneVoted(eventId: string) {
         .eq("id", eventId)
         .single();
 
-    if (!event || event.status !== "voting") {
+    if (!event || event.status !== "voting" || isVotingExpired(event)) {
         return;
     }
 
-    const { data: participants } = await supabase
-        .from("participants")
-        .select("id")
-        .eq("event_id", eventId);
+    const [participantsResult, timeOptionsResult, placeOptionsResult, timeVotesResult, placeVotesResult] =
+        await Promise.all([
+            supabase.from("participants").select("id").eq("event_id", eventId),
+            supabase.from("time_options").select("id").eq("event_id", eventId),
+            supabase.from("place_options").select("id").eq("event_id", eventId),
+            supabase
+                .from("time_votes")
+                .select("participant_id, time_option_id")
+                .eq("event_id", eventId),
+            supabase
+                .from("place_votes")
+                .select("participant_id, place_option_id")
+                .eq("event_id", eventId),
+        ]);
 
-    if (!participants || participants.length === 0) {
+    const participants = participantsResult.data ?? [];
+    const timeOptions = timeOptionsResult.data ?? [];
+    const placeOptions = placeOptionsResult.data ?? [];
+    const timeVotes = timeVotesResult.data ?? [];
+    const placeVotes = placeVotesResult.data ?? [];
+
+    if (participants.length === 0 || timeOptions.length === 0 || placeOptions.length === 0) {
         return;
     }
-
-    const { data: timeOptions } = await supabase
-        .from("time_options")
-        .select("id")
-        .eq("event_id", eventId);
-
-    const { data: placeOptions } = await supabase
-        .from("place_options")
-        .select("id")
-        .eq("event_id", eventId);
-
-    if (!timeOptions || timeOptions.length === 0) {
-        return;
-    }
-
-    if (!placeOptions || placeOptions.length === 0) {
-        return;
-    }
-
-    const { data: timeVotes } = await supabase
-        .from("time_votes")
-        .select("participant_id, time_option_id")
-        .eq("event_id", eventId);
-
-    const { data: placeVotes } = await supabase
-        .from("place_votes")
-        .select("participant_id, place_option_id")
-        .eq("event_id", eventId);
-
-    const allTimeVotes = timeVotes ?? [];
-    const allPlaceVotes = placeVotes ?? [];
 
     const everyoneVotedForEveryOption = participants.every((participant) => {
-        const participantTimeVotes = allTimeVotes.filter(
-            (vote) => vote.participant_id === participant.id
-        );
-
-        const participantPlaceVotes = allPlaceVotes.filter(
-            (vote) => vote.participant_id === participant.id
-        );
-
         const votedTimeOptionIds = new Set(
-            participantTimeVotes.map((vote) => vote.time_option_id)
+            timeVotes
+                .filter((vote) => vote.participant_id === participant.id)
+                .map((vote) => vote.time_option_id)
         );
 
         const votedPlaceOptionIds = new Set(
-            participantPlaceVotes.map((vote) => vote.place_option_id)
+            placeVotes
+                .filter((vote) => vote.participant_id === participant.id)
+                .map((vote) => vote.place_option_id)
         );
 
         const votedForAllTimeOptions = timeOptions.every((option) =>
@@ -253,7 +420,7 @@ export async function proposeTimeOptionAction(formData: FormData) {
         redirectWithError(token, "Nie znaleziono wydarzenia.", participantEmail);
     }
 
-    if (event.status !== "voting") {
+    if (event.status !== "voting" || isVotingExpired(event)) {
         redirectWithError(
             token,
             "Głosowanie nie jest aktualnie aktywne.",
@@ -300,17 +467,6 @@ export async function proposeTimeOptionAction(formData: FormData) {
 
     const supabase = createSupabaseAdminClient();
 
-    const { data: existingTimeOption } = await supabase
-        .from("time_options")
-        .select("id")
-        .eq("event_id", event.id)
-        .eq("starts_at", startsAt.toISOString())
-        .maybeSingle();
-
-    if (existingTimeOption) {
-        redirectWithError(token, "Taki termin już istnieje.", participantEmail);
-    }
-
     const { error } = await supabase.from("time_options").insert({
         event_id: event.id,
         starts_at: startsAt.toISOString(),
@@ -319,10 +475,28 @@ export async function proposeTimeOptionAction(formData: FormData) {
 
     if (error) redirectWithError(token, error.message, participantEmail);
 
+    const otherParticipants = await getOtherParticipants(event.id, participant.id);
+    const proposedTime = formatTimeRange(startsAt, endsAt);
+
+    sendEmailsInBackground(
+        otherParticipants
+            .filter((otherParticipant) => otherParticipant.email)
+            .map((otherParticipant) => ({
+                to: otherParticipant.email as string,
+                subject: `Easy2Meet: nowy termin do głosowania — ${event.title ?? "wydarzenie"}`,
+                html: buildNewTimeEmail({
+                    eventTitle: event.title ?? "Wydarzenie",
+                    participantName: otherParticipant.display_name,
+                    proposedTime,
+                    voteUrl: buildAbsoluteVoteUrl(token, otherParticipant.email ?? undefined),
+                }),
+            }))
+    );
+
     revalidatePath(`/vote/${token}`);
     redirectWithSuccess(
         token,
-        "Twoja propozycja terminu została dodana.",
+        "Twoja propozycja terminu została dodana. Uczestnicy otrzymają powiadomienie e-mail.",
         participantEmail
     );
 }
@@ -334,6 +508,12 @@ export async function proposePlaceOptionAction(formData: FormData) {
     );
     const name = String(formData.get("name") || "").trim();
     const address = String(formData.get("address") || "").trim();
+    const latitudeRaw = String(formData.get("latitude") || "").trim();
+    const longitudeRaw = String(formData.get("longitude") || "").trim();
+    const mapboxId = String(formData.get("mapboxId") || "").trim();
+
+    const latitude = latitudeRaw ? Number(latitudeRaw) : null;
+    const longitude = longitudeRaw ? Number(longitudeRaw) : null;
 
     if (!token) redirect("/");
 
@@ -345,13 +525,33 @@ export async function proposePlaceOptionAction(formData: FormData) {
         redirectWithError(token, "Nazwa miejsca jest wymagana.", participantEmail);
     }
 
+    if (
+        latitudeRaw &&
+        (latitude === null ||
+            Number.isNaN(latitude) ||
+            latitude < -90 ||
+            latitude > 90)
+    ) {
+        redirectWithError(token, "Nieprawidłowa szerokość geograficzna.", participantEmail);
+    }
+
+    if (
+        longitudeRaw &&
+        (longitude === null ||
+            Number.isNaN(longitude) ||
+            longitude < -180 ||
+            longitude > 180)
+    ) {
+        redirectWithError(token, "Nieprawidłowa długość geograficzna.", participantEmail);
+    }
+
     const event = await getEventByToken(token);
 
     if (!event) {
         redirectWithError(token, "Nie znaleziono wydarzenia.", participantEmail);
     }
 
-    if (event.status !== "voting") {
+    if (event.status !== "voting" || isVotingExpired(event)) {
         redirectWithError(
             token,
             "Głosowanie nie jest aktualnie aktywne.",
@@ -374,15 +574,38 @@ export async function proposePlaceOptionAction(formData: FormData) {
     const { error } = await supabase.from("place_options").insert({
         event_id: event.id,
         name,
-        address,
+        address: address || null,
+        latitude,
+        longitude,
+        mapbox_id: mapboxId || null,
     });
 
     if (error) redirectWithError(token, error.message, participantEmail);
 
+    const otherParticipants = await getOtherParticipants(event.id, participant.id);
+    const mapImageUrl = buildStaticMapUrl(latitude, longitude);
+
+    sendEmailsInBackground(
+        otherParticipants
+            .filter((otherParticipant) => otherParticipant.email)
+            .map((otherParticipant) => ({
+                to: otherParticipant.email as string,
+                subject: `Easy2Meet: nowe miejsce do głosowania — ${event.title ?? "wydarzenie"}`,
+                html: buildNewPlaceEmail({
+                    eventTitle: event.title ?? "Wydarzenie",
+                    participantName: otherParticipant.display_name,
+                    placeName: name,
+                    placeAddress: address || null,
+                    mapImageUrl,
+                    voteUrl: buildAbsoluteVoteUrl(token, otherParticipant.email ?? undefined),
+                }),
+            }))
+    );
+
     revalidatePath(`/vote/${token}`);
     redirectWithSuccess(
         token,
-        "Twoja propozycja miejsca została dodana.",
+        "Twoja propozycja miejsca została dodana. Uczestnicy otrzymają powiadomienie e-mail.",
         participantEmail
     );
 }
@@ -413,7 +636,7 @@ export async function voteForTimeAction(formData: FormData) {
         redirectWithError(token, "Nie znaleziono wydarzenia.", participantEmail);
     }
 
-    if (event.status !== "voting") {
+    if (event.status !== "voting" || isVotingExpired(event)) {
         redirectWithError(
             token,
             "Głosowanie nie jest aktualnie aktywne.",
@@ -432,21 +655,6 @@ export async function voteForTimeAction(formData: FormData) {
     }
 
     const supabase = createSupabaseAdminClient();
-
-    const { data: option } = await supabase
-        .from("time_options")
-        .select("id")
-        .eq("id", timeOptionId)
-        .eq("event_id", eventId)
-        .maybeSingle();
-
-    if (!option) {
-        redirectWithError(
-            token,
-            "Nie znaleziono wybranego terminu.",
-            participantEmail
-        );
-    }
 
     const { error } = await supabase.from("time_votes").upsert(
         {
@@ -494,7 +702,7 @@ export async function voteForPlaceAction(formData: FormData) {
         redirectWithError(token, "Nie znaleziono wydarzenia.", participantEmail);
     }
 
-    if (event.status !== "voting") {
+    if (event.status !== "voting" || isVotingExpired(event)) {
         redirectWithError(
             token,
             "Głosowanie nie jest aktualnie aktywne.",
@@ -513,21 +721,6 @@ export async function voteForPlaceAction(formData: FormData) {
     }
 
     const supabase = createSupabaseAdminClient();
-
-    const { data: option } = await supabase
-        .from("place_options")
-        .select("id")
-        .eq("id", placeOptionId)
-        .eq("event_id", eventId)
-        .maybeSingle();
-
-    if (!option) {
-        redirectWithError(
-            token,
-            "Nie znaleziono wybranego miejsca.",
-            participantEmail
-        );
-    }
 
     const { error } = await supabase.from("place_votes").upsert(
         {

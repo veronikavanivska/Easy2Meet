@@ -216,22 +216,24 @@ export async function addParticipantAction(formData: FormData) {
 
     const supabase = createSupabaseAdminClient();
 
+    const { data: existingParticipant } = await supabase
+        .from("participants")
+        .select("id")
+        .eq("event_id", eventId)
+        .eq("email", email)
+        .maybeSingle();
+
+    if (existingParticipant) {
+        redirectWithError(eventId, "Uczestnik z tym adresem e-mail już istnieje.");
+    }
+
     const { error } = await supabase.from("participants").insert({
         event_id: eventId,
         display_name: displayName,
         email,
     });
 
-    if (error) {
-        if (error.code === "23505") {
-            redirectWithError(
-                eventId,
-                "Uczestnik z tym adresem e-mail już istnieje."
-            );
-        }
-
-        redirectWithError(eventId, error.message);
-    }
+    if (error) redirectWithError(eventId, error.message);
 
     revalidatePath(`/events/${eventId}`);
     redirectWithSuccess(
@@ -572,6 +574,9 @@ type PlaceOptionRow = {
     event_id: string;
     name: string;
     address: string | null;
+    latitude: number | null;
+    longitude: number | null;
+    mapbox_id?: string | null;
 };
 
 type VoteRow = {
@@ -612,6 +617,19 @@ function formatTimeOption(option: TimeOptionRow) {
 
     const end = new Date(option.ends_at).toLocaleString("pl-PL");
     return `${start} — ${end}`;
+}
+
+
+function buildMapboxStaticMapUrl(latitude: number | null, longitude: number | null) {
+    const accessToken = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN;
+
+    if (!accessToken || latitude === null || longitude === null) {
+        return null;
+    }
+
+    const marker = `pin-s+1d4ed8(${longitude},${latitude})`;
+
+    return `https://api.mapbox.com/styles/v1/mapbox/streets-v12/static/${marker}/${longitude},${latitude},14,0/640x320@2x?access_token=${encodeURIComponent(accessToken)}`;
 }
 
 export async function finalizeAndSendResultsAction(formData: FormData) {
@@ -747,6 +765,20 @@ export async function finalizeAndSendResultsAction(formData: FormData) {
         ? `${bestPlace.option.name}, ${bestPlace.option.address}`
         : bestPlace.option.name;
 
+    const finalPlaceMapUrl = buildMapboxStaticMapUrl(
+        bestPlace.option.latitude,
+        bestPlace.option.longitude
+    );
+
+    const finalPlaceMapHtml = finalPlaceMapUrl
+        ? `
+            <div style="margin: 24px 0;">
+                <h3 style="margin: 0 0 8px; color: #1d4ed8;">Mapa miejsca</h3>
+                <img src="${finalPlaceMapUrl}" alt="Mapa miejsca spotkania" style="display:block; width:100%; max-width:552px; border-radius:12px; border:1px solid #e2e8f0;" />
+            </div>
+        `
+        : "";
+
     const emails = participants
         .filter((participant) => participant.email)
         .map((participant) => ({
@@ -782,6 +814,8 @@ export async function finalizeAndSendResultsAction(formData: FormData) {
                                 Głosy: Tak ${bestPlace.score.yes}, Może ${bestPlace.score.maybe}, Nie ${bestPlace.score.no}
                             </p>
                         </div>
+
+                        ${finalPlaceMapHtml}
 
                         <p>Dziękujemy za udział w głosowaniu.</p>
 

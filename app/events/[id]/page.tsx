@@ -16,7 +16,7 @@ import {
     startVotingAction,
 } from "./actions";
 import { EventPlacesMap } from "../../components/event-places-map";
-import { MapboxAddressInput } from "../../components/mapbox-address-input";
+import { MapboxPlacePicker } from "../../components/mapbox-place-picker";
 
 type PageProps = {
     params: Promise<{
@@ -146,6 +146,18 @@ function compareResults(a: ResultCounts, b: ResultCounts) {
     return a.no - b.no;
 }
 
+
+function getEffectiveEventStatus(event: EventRecord) {
+    if (event.status !== "voting") return event.status;
+    if (!event.voting_deadline) return event.status;
+
+    const deadline = new Date(event.voting_deadline);
+
+    if (Number.isNaN(deadline.getTime())) return event.status;
+
+    return deadline <= new Date() ? "closed" : event.status;
+}
+
 function formatTimeOption(option: TimeOption) {
     const start = new Date(option.starts_at).toLocaleString("pl-PL");
 
@@ -260,7 +272,11 @@ export default async function EventDetailsPage({
         throw new Error(placeVotesResult.error.message);
     }
 
-    const event = eventData as EventRecord;
+    const eventRaw = eventData as EventRecord;
+    const event = {
+        ...eventRaw,
+        status: getEffectiveEventStatus(eventRaw),
+    };
     const timeOptions = (timeOptionsResult.data ?? []) as TimeOption[];
     const placeOptions = (placeOptionsResult.data ?? []) as PlaceOption[];
     const participants = (participantsResult.data ?? []) as Participant[];
@@ -739,10 +755,10 @@ export default async function EventDetailsPage({
 
                             <div>
                                 <label className="mb-2 block text-sm font-semibold text-slate-800">
-                                    Adres opcjonalnie
+                                    Adres i punkt na mapie
                                 </label>
 
-                                <MapboxAddressInput disabled={!canEditSetup} />
+                                <MapboxPlacePicker disabled={!canEditSetup} />
                             </div>
 
                             <button
