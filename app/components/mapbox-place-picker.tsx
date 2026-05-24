@@ -210,10 +210,7 @@ export function MapboxPlacePicker({ disabled = false }: MapboxPlacePickerProps) 
 
         const trimmedCity = city.trim();
 
-        if (trimmedCity.length < 2) {
-            setCityViewport(null);
-            return;
-        }
+        if (trimmedCity.length < 2) return;
 
         const controller = new AbortController();
 
@@ -306,10 +303,7 @@ export function MapboxPlacePicker({ disabled = false }: MapboxPlacePickerProps) 
 
         const trimmedAddress = address.trim();
 
-        if (trimmedAddress.length < 3) {
-            setSuggestions([]);
-            return;
-        }
+        if (trimmedAddress.length < 3) return;
 
         if (hasSelectedLocation) return;
 
@@ -410,6 +404,7 @@ export function MapboxPlacePicker({ disabled = false }: MapboxPlacePickerProps) 
                 value={city}
                 onChange={(event) => {
                     setCity(event.target.value);
+                    setCityViewport(null);
                     clearSelectedLocation();
                 }}
                 disabled={disabled}
@@ -424,6 +419,7 @@ export function MapboxPlacePicker({ disabled = false }: MapboxPlacePickerProps) 
                     value={address}
                     onChange={(event) => {
                         setAddress(event.target.value);
+                        setSuggestions([]);
                         clearSelectedLocation();
                     }}
                     disabled={disabled}
