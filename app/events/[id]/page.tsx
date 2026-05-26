@@ -490,20 +490,6 @@ export default async function EventDetailsPage({
                         </div>
                     )}
 
-                    <div className="mt-8 rounded-2xl border border-white/50 bg-white/40 p-5 backdrop-blur-xl">
-                        <h2 className="font-semibold text-slate-900">
-                            Link do głosowania
-                        </h2>
-
-                        <p className="mt-2 break-all text-sm text-slate-700">
-                            {fullVoteLink}
-                        </p>
-
-                        <p className="mt-2 text-xs text-slate-500">
-                            Link zostanie wysłany uczestnikom e-mailem po rozpoczęciu
-                            głosowania.
-                        </p>
-                    </div>
                 </div>
 
                 {showResults && (
