@@ -31,16 +31,16 @@ async function assertEventOwner(eventId: string, userId: string) {
     return event;
 }
 
-function sendEmailsInBackground(
+async function sendEmails(
     emails: Array<{
         to: string;
         subject: string;
         html: string;
     }>
 ) {
-    if (emails.length === 0) return;
+    if (emails.length === 0) return 0;
 
-    void Promise.allSettled(
+    const results = await Promise.allSettled(
         emails.map((email) =>
             sendEmail({
                 to: email.to,
@@ -48,13 +48,15 @@ function sendEmailsInBackground(
                 html: email.html,
             })
         )
-    ).then((results) => {
-        const failed = results.filter((result) => result.status === "rejected");
+    );
 
-        if (failed.length > 0) {
-            console.error("Failed to send some emails:", failed);
-        }
-    });
+    const failed = results.filter((result) => result.status === "rejected");
+
+    if (failed.length > 0) {
+        console.error("Failed to send some emails:", failed);
+    }
+
+    return failed.length;
 }
 
 export async function addTimeOptionAction(formData: FormData) {
@@ -81,8 +83,8 @@ export async function addTimeOptionAction(formData: FormData) {
         );
     }
 
-    const startsAt = new Date(startsAtRaw);
-    const endsAt = endsAtRaw ? new Date(endsAtRaw) : null;
+    const startsAt = parseWarsawDateTimeLocal(startsAtRaw);
+    const endsAt = endsAtRaw ? parseWarsawDateTimeLocal(endsAtRaw) : null;
 
     if (Number.isNaN(startsAt.getTime())) {
         redirectWithError(eventId, "Nieprawidłowa data rozpoczęcia.");
@@ -265,7 +267,7 @@ export async function startVotingAction(formData: FormData) {
         redirectWithError(eventId, "Ustaw termin zakończenia głosowania.");
     }
 
-    const votingDeadline = new Date(votingDeadlineRaw);
+    const votingDeadline = parseWarsawDateTimeLocal(votingDeadlineRaw);
 
     if (Number.isNaN(votingDeadline.getTime())) {
         redirectWithError(eventId, "Nieprawidłowy termin zakończenia głosowania.");
@@ -358,7 +360,7 @@ export async function startVotingAction(formData: FormData) {
 
                         <p>
                             Termin zakończenia głosowania:
-                            <strong>${votingDeadline.toLocaleString("pl-PL")}</strong>
+                            <strong>${formatWarsawDate(votingDeadline)}</strong>
                         </p>
 
                         <p>Kliknij poniższy przycisk, aby wybrać pasujący termin i miejsce:</p>
@@ -388,13 +390,20 @@ export async function startVotingAction(formData: FormData) {
             `,
         }));
 
-    sendEmailsInBackground(emails);
+    const failedEmails = await sendEmails(emails);
 
     revalidatePath(`/events/${eventId}`);
 
+    if (failedEmails > 0) {
+        redirectWithSuccess(
+            eventId,
+            `Głosowanie zostało rozpoczęte, ale nie udało się wysłać ${failedEmails} wiadomości e-mail.`
+        );
+    }
+
     redirectWithSuccess(
         eventId,
-        "Głosowanie zostało rozpoczęte. Zaproszenia są wysyłane e-mailem."
+        "Głosowanie zostało rozpoczęte. Zaproszenia zostały wysłane e-mailem."
     );
 }
 
@@ -609,13 +618,13 @@ function compareVoteScores(
 }
 
 function formatTimeOption(option: TimeOptionRow) {
-    const start = new Date(option.starts_at).toLocaleString("pl-PL");
+    const start = formatWarsawDate(option.starts_at);
 
     if (!option.ends_at) {
         return start;
     }
 
-    const end = new Date(option.ends_at).toLocaleString("pl-PL");
+    const end = formatWarsawDate(option.ends_at);
     return `${start} — ${end}`;
 }
 
@@ -829,12 +838,83 @@ export async function finalizeAndSendResultsAction(formData: FormData) {
             `,
         }));
 
-    sendEmailsInBackground(emails);
+    const failedEmails = await sendEmails(emails);
 
     revalidatePath(`/events/${eventId}`);
 
+    if (failedEmails > 0) {
+        redirectWithSuccess(
+            eventId,
+            `Wyniki zostały zatwierdzone, ale nie udało się wysłać ${failedEmails} wiadomości e-mail.`
+        );
+    }
+
     redirectWithSuccess(
         eventId,
-        "Wyniki zostały zatwierdzone. Wiadomości e-mail są wysyłane uczestnikom."
+        "Wyniki zostały zatwierdzone. Wiadomości e-mail zostały wysłane uczestnikom."
+    );
+}
+
+function formatWarsawDate(date: Date | string) {
+    return new Date(date).toLocaleString("pl-PL", {
+        timeZone: "Europe/Warsaw",
+    });
+}
+
+function parseWarsawDateTimeLocal(value: string) {
+    const [datePart, timePart] = value.split("T");
+
+    if (!datePart || !timePart) {
+        return new Date(Number.NaN);
+    }
+
+    const [year, month, day] = datePart.split("-").map(Number);
+    const [hour, minute] = timePart.split(":").map(Number);
+
+    if (
+        !year ||
+        !month ||
+        !day ||
+        Number.isNaN(hour) ||
+        Number.isNaN(minute)
+    ) {
+        return new Date(Number.NaN);
+    }
+
+    const formatter = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Europe/Warsaw",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+    });
+
+    const utcGuess = new Date(Date.UTC(year, month - 1, day, hour, minute, 0, 0));
+
+    const parts = formatter.formatToParts(utcGuess);
+    const getPart = (type: string) =>
+        Number(parts.find((part) => part.type === type)?.value);
+
+    const warsawYear = getPart("year");
+    const warsawMonth = getPart("month");
+    const warsawDay = getPart("day");
+    const warsawHour = getPart("hour");
+    const warsawMinute = getPart("minute");
+
+    const diffMinutes =
+        (Date.UTC(year, month - 1, day, hour, minute) -
+            Date.UTC(
+                warsawYear,
+                warsawMonth - 1,
+                warsawDay,
+                warsawHour,
+                warsawMinute
+            )) /
+        60000;
+
+    return new Date(
+        Date.UTC(year, month - 1, day, hour, minute) + diffMinutes * 60000
     );
 }
